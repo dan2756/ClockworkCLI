@@ -1,0 +1,4 @@
+/cronlite
+/dist/
+*.test
+*.out
