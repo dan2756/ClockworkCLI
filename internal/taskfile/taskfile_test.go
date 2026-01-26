@@ -120,3 +120,56 @@ func TestParseFileSetsDir(t *testing.T) {
 		t.Errorf("Dir = %q, want %q", tasks[0].Dir, dir)
 	}
 }
+
+func TestParseCron(t *testing.T) {
+	src := `cron "*/15 9-17 * * 1-5"  ./check-queue.sh
+cron '0 3 * * sun' ./weekly.sh
+cron 0 12 1 * *   echo "first of the month"
+`
+	tasks, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ sched, cmd string }{
+		{`cron "*/15 9-17 * * 1-5"`, "./check-queue.sh"},
+		{`cron "0 3 * * sun"`, "./weekly.sh"},
+		{`cron "0 12 1 * *"`, `echo "first of the month"`},
+	}
+	for i, w := range want {
+		if got := tasks[i].Schedule.String(); got != w.sched {
+			t.Errorf("task %d schedule = %s, want %s", i, got, w.sched)
+		}
+		if tasks[i].Command != w.cmd {
+			t.Errorf("task %d command = %q, want %q", i, tasks[i].Command, w.cmd)
+		}
+	}
+}
+
+func TestParseCronErrors(t *testing.T) {
+	src := `cron
+cron "61 * * * *" ./x.sh
+cron "* * * *" ./x.sh
+cron "0 0 30 2 *" ./never.sh
+cron "* * * * *
+`
+	_, err := Parse(strings.NewReader(src))
+	var list ErrorList
+	if !errors.As(err, &list) {
+		t.Fatalf("err = %v, want ErrorList", err)
+	}
+	want := []string{
+		"cron: missing expression",
+		"cron: minute: 61 out of range 0-59",
+		"cron: want 5 fields",
+		"cron: day-of-month 30 never occurs in month 2",
+		"cron: unterminated",
+	}
+	if len(list) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)
+	}
+	for i, w := range want {
+		if list[i].Line != i+1 || !strings.Contains(list[i].Msg, w) {
+			t.Errorf("error %d = line %d %q, want line %d containing %q", i, list[i].Line, list[i].Msg, i+1, w)
+		}
+	}
+}

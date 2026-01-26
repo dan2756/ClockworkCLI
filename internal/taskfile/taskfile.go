@@ -3,8 +3,9 @@
 // A task file has one task per line: a schedule followed by a shell
 // command. Blank lines and lines starting with # are ignored.
 //
-//	every 5m      ./scripts/sync.sh
-//	every 1h30m   rsync -a ~/notes/ backup:/notes/
+//	every 5m                  ./scripts/sync.sh
+//	every 1h30m               rsync -a ~/notes/ backup:/notes/
+//	cron "*/15 9-17 * * 1-5"  ./check-queue.sh
 package taskfile
 
 import (
@@ -124,8 +125,18 @@ func parseLine(line string) (*Task, error) {
 			return nil, fmt.Errorf("every: interval must be positive")
 		}
 		t.Schedule = schedule.Every{Interval: d}
+	case "cron":
+		expr, err := lx.cronExpr()
+		if err != nil {
+			return nil, err
+		}
+		c, err := schedule.ParseCron(expr)
+		if err != nil {
+			return nil, fmt.Errorf("cron: %v", err)
+		}
+		t.Schedule = c
 	default:
-		return nil, fmt.Errorf("unknown schedule %q (want every)", kw)
+		return nil, fmt.Errorf("unknown schedule %q (want every or cron)", kw)
 	}
 	t.Command = lx.rest()
 	if t.Command == "" {
@@ -234,6 +245,34 @@ func (l *lexer) word() (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// cronExpr reads a cron expression: either one quoted word or five
+// unquoted fields.
+func (l *lexer) cronExpr() (string, error) {
+	l.skipSpace()
+	if l.pos < len(l.s) && (l.s[l.pos] == '"' || l.s[l.pos] == '\'') {
+		expr, err := l.word()
+		if err != nil {
+			return "", fmt.Errorf("cron: %v", err)
+		}
+		return expr, nil
+	}
+	fields := make([]string, 0, 5)
+	for range 5 {
+		w, err := l.word()
+		if err != nil {
+			return "", fmt.Errorf("cron: %v", err)
+		}
+		if w == "" {
+			break
+		}
+		fields = append(fields, w)
+	}
+	if len(fields) == 0 {
+		return "", fmt.Errorf("cron: missing expression")
+	}
+	return strings.Join(fields, " "), nil
 }
 
 // rest returns the remainder of the line, verbatim.
