@@ -21,6 +21,8 @@ Create `cronlite.txt`:
 # comments and blank lines are fine
 every 5m                    ./scripts/sync.sh
 every 1h30m                 rsync -a ~/notes/ backup:/notes/
+at 09:00                    ./standup-reminder.sh
+at 09:00,13:30 weekdays     say "stretch"
 cron "*/15 9-17 * * 1-5"    ./check-queue.sh
 ```
 
@@ -36,6 +38,9 @@ from the directory that contains the task file.
 
 - `every <duration>` uses Go duration syntax (`10s`, `5m`, `1h30m`) plus `d`
   for days (`2d`).
+- `at HH:MM[,HH:MM...]` runs daily at those local times. Add `weekdays`,
+  `weekends` or a list of days such as `mon,wed,fri` (ranges like `mon-thu`
+  work too) to limit it to certain days.
 - `cron "<expr>"` takes a standard five-field cron expression: lists, ranges,
   steps and month/weekday names (`jan`, `mon`) all work.
 

@@ -43,6 +43,7 @@ Options:
 Task file:
   every 5m                    ./scripts/sync.sh
   every 1h30m                 rsync -a ~/notes/ backup:/notes/
+  at 09:00,13:30 weekdays     say "stretch"
   cron "*/15 9-17 * * 1-5"    ./check-queue.sh
 `
 

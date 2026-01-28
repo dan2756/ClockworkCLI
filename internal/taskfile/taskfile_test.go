@@ -173,3 +173,58 @@ cron "* * * * *
 		}
 	}
 }
+
+func TestParseAt(t *testing.T) {
+	src := `at 09:00            ./standup-reminder.sh
+at 09:00,13:30 weekdays  say "stretch"
+at 18:00 mon,wed,fri   ./gym.sh
+at 7:30 Weekends sleep 3600
+at 12:00 saybye
+`
+	tasks, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ sched, cmd string }{
+		{"at 09:00", "./standup-reminder.sh"},
+		{"at 09:00,13:30 weekdays", `say "stretch"`},
+		{"at 18:00 mon,wed,fri", "./gym.sh"},
+		{"at 07:30 weekends", "sleep 3600"},
+		{"at 12:00", "saybye"},
+	}
+	for i, w := range want {
+		if got := tasks[i].Schedule.String(); got != w.sched {
+			t.Errorf("task %d schedule = %s, want %s", i, got, w.sched)
+		}
+		if tasks[i].Command != w.cmd {
+			t.Errorf("task %d command = %q, want %q", i, tasks[i].Command, w.cmd)
+		}
+	}
+}
+
+func TestParseAtErrors(t *testing.T) {
+	src := `at
+at 25:00 ./late.sh
+at 9 ./nine.sh
+at 09:00 weekdays
+`
+	_, err := Parse(strings.NewReader(src))
+	var list ErrorList
+	if !errors.As(err, &list) {
+		t.Fatalf("err = %v, want ErrorList", err)
+	}
+	want := []string{
+		"at: missing time",
+		`at: invalid time "25:00"`,
+		`at: invalid time "9"`,
+		"missing command",
+	}
+	if len(list) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)
+	}
+	for i, w := range want {
+		if list[i].Line != i+1 || !strings.Contains(list[i].Msg, w) {
+			t.Errorf("error %d = line %d %q, want line %d containing %q", i, list[i].Line, list[i].Msg, i+1, w)
+		}
+	}
+}

@@ -5,6 +5,7 @@
 //
 //	every 5m                  ./scripts/sync.sh
 //	every 1h30m               rsync -a ~/notes/ backup:/notes/
+//	at 09:00,13:30 weekdays   say "stretch"
 //	cron "*/15 9-17 * * 1-5"  ./check-queue.sh
 package taskfile
 
@@ -125,6 +126,29 @@ func parseLine(line string) (*Task, error) {
 			return nil, fmt.Errorf("every: interval must be positive")
 		}
 		t.Schedule = schedule.Every{Interval: d}
+	case "at":
+		arg, err := lx.word()
+		if err != nil {
+			return nil, err
+		}
+		if arg == "" {
+			return nil, fmt.Errorf("at: missing time")
+		}
+		times, err := schedule.ParseTimes(arg)
+		if err != nil {
+			return nil, fmt.Errorf("at: %v", err)
+		}
+		a := &schedule.At{Times: times, Days: schedule.AllDays}
+		// An optional day filter may follow; anything else starts the command.
+		save := lx.pos
+		if w, err := lx.word(); err == nil && w != "" {
+			if days, err := schedule.ParseDays(w); err == nil {
+				a.Days = days
+				save = lx.pos
+			}
+		}
+		lx.pos = save
+		t.Schedule = a
 	case "cron":
 		expr, err := lx.cronExpr()
 		if err != nil {
@@ -136,7 +160,7 @@ func parseLine(line string) (*Task, error) {
 		}
 		t.Schedule = c
 	default:
-		return nil, fmt.Errorf("unknown schedule %q (want every or cron)", kw)
+		return nil, fmt.Errorf("unknown schedule %q (want every, at or cron)", kw)
 	}
 	t.Command = lx.rest()
 	if t.Command == "" {
