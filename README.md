@@ -24,6 +24,7 @@ every 1h30m                 rsync -a ~/notes/ backup:/notes/
 at 09:00                    ./standup-reminder.sh
 at 09:00,13:30 weekdays     say "stretch"
 cron "*/15 9-17 * * 1-5"    ./check-queue.sh
+every 10s  timeout=5s  name=ping   curl -fsS https://example.com/health
 ```
 
 Then:
@@ -52,6 +53,24 @@ Mon 2026-01-26 09:00 EST  in 13h9m
 Mon 2026-01-26 09:15 EST  in 13h24m
 Mon 2026-01-26 09:30 EST  in 13h39m
 ```
+
+### Task options
+
+Options go between the schedule and the command:
+
+| Option            | Meaning                                                        |
+|-------------------|----------------------------------------------------------------|
+| `timeout=DUR`     | kill the run (its whole process group) after `DUR`             |
+| `name=NAME`       | name shown in output; defaults to the program name (`sync`)    |
+| `jitter=DUR`      | delay each run by a random amount between 0 and `DUR`          |
+| `dir=PATH`        | working directory, relative to the task file; `~` is expanded  |
+| `onfail=continue` | a failed run is reported but not treated as an error           |
+
+Options are lowercase `key=value` words, so a command can still start with
+an environment assignment: `every 1h LANG=C ./report.sh`.
+
+Each run gets `CRONLITE_TASK` (the task name) and `CRONLITE_RUN` (1 for the
+first run, 2 for the next, ...) in its environment.
 
 cronlite reads `./cronlite.txt` if it exists, otherwise
 `~/.config/cronlite/tasks`. Use `-f FILE` to pick another file.

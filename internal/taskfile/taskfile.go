@@ -7,6 +7,10 @@
 //	every 1h30m               rsync -a ~/notes/ backup:/notes/
 //	at 09:00,13:30 weekdays   say "stretch"
 //	cron "*/15 9-17 * * 1-5"  ./check-queue.sh
+//
+// Options may sit between the schedule and the command:
+//
+//	every 10s timeout=5s name=ping curl -fsS https://example.com/health
 package taskfile
 
 import (
@@ -16,7 +20,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/dan2756/cronlite/internal/schedule"
 )
@@ -27,8 +33,17 @@ type Task struct {
 	Line     int
 	Schedule schedule.Schedule
 	Command  string
-	Dir      string // working directory; empty means the current directory
+	Dir      string        // working directory; empty means the current directory
+	Timeout  time.Duration // kill the run after this long; 0 means never
+	Jitter   time.Duration // delay each run by a random amount up to this
+	// AllowFail is set by onfail=continue: a failed run is reported but
+	// not treated as an error.
+	AllowFail bool
 }
+
+// Options lists the option keys accepted between the schedule and the
+// command.
+var Options = []string{"timeout", "name", "jitter", "dir", "onfail"}
 
 // An Error is a problem on a specific line of a task file.
 type Error struct {
@@ -76,7 +91,10 @@ func Parse(r io.Reader) ([]*Task, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	assignNames(tasks)
+	if dups := assignNames(tasks); len(dups) > 0 {
+		errs = append(errs, dups...)
+		slices.SortStableFunc(errs, func(a, b *Error) int { return a.Line - b.Line })
+	}
 	if len(errs) > 0 {
 		return tasks, errs
 	}
@@ -84,7 +102,8 @@ func Parse(r io.Reader) ([]*Task, error) {
 }
 
 // ParseFile reads the task file at path. Tasks run in the directory that
-// contains the file.
+// contains the file unless they set dir=, which is itself relative to that
+// directory and may start with ~.
 func ParseFile(name string) ([]*Task, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -92,51 +111,80 @@ func ParseFile(name string) ([]*Task, error) {
 	}
 	defer f.Close()
 	tasks, err := Parse(f)
-	dir, absErr := filepath.Abs(filepath.Dir(name))
+	base, absErr := filepath.Abs(filepath.Dir(name))
 	if absErr != nil {
 		return nil, absErr
 	}
 	for _, t := range tasks {
-		t.Dir = dir
+		t.Dir = resolveDir(base, t.Dir)
 	}
 	return tasks, err
 }
 
+func resolveDir(base, dir string) string {
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, dir[1:])
+		}
+	}
+	if dir == "" {
+		return base
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(base, dir)
+	}
+	return filepath.Clean(dir)
+}
+
 func parseLine(line string) (*Task, error) {
 	lx := &lexer{s: line}
-	kw, err := lx.word()
-	if err != nil {
+	t := &Task{}
+	if err := parseSchedule(lx, t); err != nil {
 		return nil, err
 	}
-	t := &Task{}
+	if err := parseOptions(lx, t); err != nil {
+		return nil, err
+	}
+	t.Command = lx.rest()
+	if t.Command == "" {
+		return nil, fmt.Errorf("missing command")
+	}
+	return t, nil
+}
+
+func parseSchedule(lx *lexer, t *Task) error {
+	kw, err := lx.word()
+	if err != nil {
+		return err
+	}
 	switch kw {
 	case "every":
 		arg, err := lx.word()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if arg == "" {
-			return nil, fmt.Errorf("every: missing interval")
+			return fmt.Errorf("every: missing interval")
 		}
 		d, err := schedule.ParseDuration(arg)
 		if err != nil {
-			return nil, fmt.Errorf("every: %v", err)
+			return fmt.Errorf("every: %v", err)
 		}
 		if d <= 0 {
-			return nil, fmt.Errorf("every: interval must be positive")
+			return fmt.Errorf("every: interval must be positive")
 		}
 		t.Schedule = schedule.Every{Interval: d}
 	case "at":
 		arg, err := lx.word()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if arg == "" {
-			return nil, fmt.Errorf("at: missing time")
+			return fmt.Errorf("at: missing time")
 		}
 		times, err := schedule.ParseTimes(arg)
 		if err != nil {
-			return nil, fmt.Errorf("at: %v", err)
+			return fmt.Errorf("at: %v", err)
 		}
 		a := &schedule.At{Times: times, Days: schedule.AllDays}
 		// An optional day filter may follow; anything else starts the command.
@@ -152,34 +200,115 @@ func parseLine(line string) (*Task, error) {
 	case "cron":
 		expr, err := lx.cronExpr()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		c, err := schedule.ParseCron(expr)
 		if err != nil {
-			return nil, fmt.Errorf("cron: %v", err)
+			return fmt.Errorf("cron: %v", err)
 		}
 		t.Schedule = c
 	default:
-		return nil, fmt.Errorf("unknown schedule %q (want every, at or cron)", kw)
+		return fmt.Errorf("unknown schedule %q (want every, at or cron)", kw)
 	}
-	t.Command = lx.rest()
-	if t.Command == "" {
-		return nil, fmt.Errorf("missing command")
-	}
-	return t, nil
+	return nil
 }
 
-// assignNames gives every task a unique name derived from its command.
-func assignNames(tasks []*Task) {
-	seen := make(map[string]int)
-	for _, t := range tasks {
-		base := commandName(t.Command)
-		seen[base]++
-		t.Name = base
-		if n := seen[base]; n > 1 {
-			t.Name = fmt.Sprintf("%s-%d", base, n)
+// parseOptions reads key=value options up to the first word that is not
+// one. Only lowercase keys are options, so a command may still start with
+// an environment assignment such as FOO=bar.
+func parseOptions(lx *lexer, t *Task) error {
+	seen := make(map[string]bool)
+	for {
+		save := lx.pos
+		w, err := lx.word()
+		if err != nil {
+			return err
+		}
+		key, val, ok := strings.Cut(w, "=")
+		if !ok || !isLowerWord(key) {
+			lx.pos = save
+			return nil
+		}
+		if !slices.Contains(Options, key) {
+			return fmt.Errorf("unknown option %q (want %s)", key, strings.Join(Options, ", "))
+		}
+		if seen[key] {
+			return fmt.Errorf("%s= given twice", key)
+		}
+		seen[key] = true
+		switch key {
+		case "timeout", "jitter":
+			d, err := schedule.ParseDuration(val)
+			if err != nil {
+				return fmt.Errorf("%s: %v", key, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("%s: must be positive", key)
+			}
+			if key == "timeout" {
+				t.Timeout = d
+			} else {
+				t.Jitter = d
+			}
+		case "name":
+			if val == "" || strings.IndexFunc(val, func(r rune) bool { return !isNameRune(r) }) >= 0 {
+				return fmt.Errorf("name: %q may only contain letters, digits, '.', '_' and '-'", val)
+			}
+			t.Name = val
+		case "dir":
+			if val == "" {
+				return fmt.Errorf("dir: missing directory")
+			}
+			t.Dir = val
+		case "onfail":
+			if val != "continue" {
+				return fmt.Errorf(`onfail: unknown value %q (only "continue" is supported)`, val)
+			}
+			t.AllowFail = true
 		}
 	}
+}
+
+func isLowerWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// assignNames checks that explicit names are unique and gives every other
+// task a unique name derived from its command.
+func assignNames(tasks []*Task) []*Error {
+	var errs []*Error
+	taken := make(map[string]int) // name -> line
+	for _, t := range tasks {
+		if t.Name == "" {
+			continue
+		}
+		if line, dup := taken[t.Name]; dup {
+			errs = append(errs, &Error{Line: t.Line, Msg: fmt.Sprintf("duplicate task name %q (also on line %d)", t.Name, line)})
+			continue
+		}
+		taken[t.Name] = t.Line
+	}
+	for _, t := range tasks {
+		if t.Name != "" {
+			continue
+		}
+		base := commandName(t.Command)
+		name := base
+		for n := 2; taken[name] != 0; n++ {
+			name = fmt.Sprintf("%s-%d", base, n)
+		}
+		taken[name] = t.Line
+		t.Name = name
+	}
+	return errs
 }
 
 // commandName derives a short name from a command line: the base name of

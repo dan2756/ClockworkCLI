@@ -2,25 +2,86 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
+	"strconv"
+	"syscall"
 	"time"
 
+	"github.com/dan2756/cronlite/internal/schedule"
 	"github.com/dan2756/cronlite/internal/taskfile"
 )
 
-// Exec runs the task's command with sh -c and waits for it to exit. Its
-// output is line-prefixed onto out. Cancelling ctx kills the command.
-func Exec(ctx context.Context, t *taskfile.Task, out *Output) error {
+// killDelay is how long a timed-out task gets between SIGTERM and SIGKILL.
+const killDelay = 2 * time.Second
+
+// ErrKilled is returned by Exec when its context is cancelled.
+var ErrKilled = errors.New("killed")
+
+// A TimeoutError reports that a run exceeded its timeout and was killed.
+type TimeoutError struct {
+	After time.Duration
+}
+
+func (e *TimeoutError) Error() string {
+	return "timed out after " + schedule.FormatDuration(e.After)
+}
+
+// Exec runs the task's command with sh -c in a process group of its own
+// and waits for it to exit. Output is line-prefixed onto out, and the
+// command sees CRONLITE_TASK and CRONLITE_RUN in its environment.
+//
+// When the task's timeout expires the whole process group gets SIGTERM,
+// then SIGKILL if it is still around shortly after. Cancelling ctx kills
+// the group at once.
+func Exec(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
 	stdout := out.lineWriter(out.Stdout, t.Name)
 	stderr := out.lineWriter(out.Stderr, t.Name)
 	defer stdout.Flush()
 	defer stderr.Flush()
 
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", t.Command)
+	cmd := exec.Command("/bin/sh", "-c", t.Command)
 	cmd.Dir = t.Dir
+	cmd.Env = append(os.Environ(),
+		"CRONLITE_TASK="+t.Name,
+		"CRONLITE_RUN="+strconv.Itoa(run),
+	)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	return cmd.Run()
+	setProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var timeout <-chan time.Time
+	if t.Timeout > 0 {
+		timer := time.NewTimer(t.Timeout)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-timeout:
+		signalGroup(cmd, syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(killDelay):
+			signalGroup(cmd, syscall.SIGKILL)
+			<-done
+		case <-ctx.Done():
+			signalGroup(cmd, syscall.SIGKILL)
+			<-done
+		}
+		return &TimeoutError{After: t.Timeout}
+	case <-ctx.Done():
+		signalGroup(cmd, syscall.SIGKILL)
+		<-done
+		return ErrKilled
+	}
 }
 
 // elapsed formats a run time with sensible precision.

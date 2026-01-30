@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -23,31 +25,49 @@ func Run(ctx context.Context, tasks []*taskfile.Task, out *Output) {
 }
 
 func loop(ctx context.Context, t *taskfile.Task, out *Output) {
-	for {
+	for run := 1; ; run++ {
 		next := t.Schedule.Next(time.Now())
 		if next.IsZero() {
 			out.Eventf(t.Name, "never fires again")
 			return
 		}
-		timer := time.NewTimer(time.Until(next))
+		wait := time.Until(next)
+		if t.Jitter > 0 {
+			wait += rand.N(t.Jitter)
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
 		}
-		runOnce(ctx, t, out)
+		RunOnce(ctx, t, run, out)
 	}
 }
 
-func runOnce(ctx context.Context, t *taskfile.Task, out *Output) {
-	out.Eventf(t.Name, "started")
+// RunOnce executes one run of t, logging when it starts and how it ended.
+// It returns the run's error unless the task allows failure.
+func RunOnce(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
+	out.Eventf(t.Name, "run %d started", run)
 	start := time.Now()
-	err := Exec(ctx, t, out)
+	err := Exec(ctx, t, run, out)
 	took := elapsed(time.Since(start))
-	if err != nil {
-		out.Eventf(t.Name, "failed after %s: %v", took, err)
-		return
+	note := ""
+	if t.AllowFail {
+		note = ", ignored: onfail=continue"
 	}
-	out.Eventf(t.Name, "finished in %s", took)
+	var timeout *TimeoutError
+	switch {
+	case err == nil:
+		out.Eventf(t.Name, "run %d ok (%s)", run, took)
+	case errors.As(err, &timeout):
+		out.Eventf(t.Name, "run %d %v, process group killed%s", run, err, note)
+	default:
+		out.Eventf(t.Name, "run %d failed: %v (%s%s)", run, err, took, note)
+	}
+	if t.AllowFail {
+		return nil
+	}
+	return err
 }

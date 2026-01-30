@@ -45,6 +45,14 @@ Task file:
   every 1h30m                 rsync -a ~/notes/ backup:/notes/
   at 09:00,13:30 weekdays     say "stretch"
   cron "*/15 9-17 * * 1-5"    ./check-queue.sh
+  every 10s timeout=5s name=ping curl -fsS https://example.com/health
+
+Task options (between the schedule and the command):
+  timeout=DUR      kill the task's process group after DUR
+  name=NAME        name shown in output (default: derived from the command)
+  jitter=DUR       delay each run by a random amount up to DUR
+  dir=PATH         working directory (default: the task file's directory)
+  onfail=continue  report failures but do not treat them as errors
 `
 
 func main() {

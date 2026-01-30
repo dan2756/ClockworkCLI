@@ -106,18 +106,120 @@ every 1m ./sync.py
 	}
 }
 
-func TestParseFileSetsDir(t *testing.T) {
+func TestParseFileResolvesDir(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", "/home/someone")
 	path := filepath.Join(dir, "tasks")
-	if err := os.WriteFile(path, []byte("every 1m true\n"), 0o644); err != nil {
+	src := `every 1m true
+every 1m dir=scripts true
+every 1m dir=/srv/app true
+every 1m dir=~/notes true
+every 1m dir="../with space" true
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tasks, err := ParseFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tasks[0].Dir != dir {
-		t.Errorf("Dir = %q, want %q", tasks[0].Dir, dir)
+	want := []string{
+		dir,
+		filepath.Join(dir, "scripts"),
+		"/srv/app",
+		"/home/someone/notes",
+		filepath.Join(filepath.Dir(dir), "with space"),
+	}
+	for i, w := range want {
+		if tasks[i].Dir != w {
+			t.Errorf("task %d Dir = %q, want %q", i, tasks[i].Dir, w)
+		}
+	}
+}
+
+func TestParseOptions(t *testing.T) {
+	src := `every 10s  timeout=5s  name=ping   curl -fsS https://example.com/health
+at 03:00 weekdays jitter=10m onfail=continue ./backup.sh
+cron "0 * * * *" dir="/tmp/a b" FOO=bar ./env.sh
+every 1m LANG=C ./run.sh name=x
+`
+	tasks, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ping := tasks[0]
+	if ping.Name != "ping" || ping.Timeout != 5*time.Second || ping.Command != "curl -fsS https://example.com/health" {
+		t.Errorf("ping = %+v", ping)
+	}
+	backup := tasks[1]
+	if backup.Jitter != 10*time.Minute || !backup.AllowFail || backup.Command != "./backup.sh" || backup.Name != "backup" {
+		t.Errorf("backup = %+v", backup)
+	}
+	if env := tasks[2]; env.Dir != "/tmp/a b" || env.Command != "FOO=bar ./env.sh" || env.Name != "env" {
+		t.Errorf("env = %+v", env)
+	}
+	// Options must come before the command; later words belong to it.
+	if lang := tasks[3]; lang.Command != "LANG=C ./run.sh name=x" || lang.Name != "run" {
+		t.Errorf("lang = %+v", lang)
+	}
+}
+
+func TestParseOptionErrors(t *testing.T) {
+	src := `every 10s timout=5s ./x.sh
+every 10s timeout=soon ./x.sh
+every 10s timeout=0s ./x.sh
+every 10s jitter=-1s ./x.sh
+every 10s name= ./x.sh
+every 10s name="a b" ./x.sh
+every 10s onfail=retry ./x.sh
+every 10s dir= ./x.sh
+every 10s name=a name=b ./x.sh
+every 10s name=ok timeout=1s
+`
+	_, err := Parse(strings.NewReader(src))
+	var list ErrorList
+	if !errors.As(err, &list) {
+		t.Fatalf("err = %v, want ErrorList", err)
+	}
+	want := []string{
+		`unknown option "timout" (want timeout, name, jitter, dir, onfail)`,
+		`timeout: invalid duration "soon"`,
+		"timeout: must be positive",
+		"jitter: must be positive",
+		`name: "" may only contain`,
+		`name: "a b" may only contain`,
+		`onfail: unknown value "retry"`,
+		"dir: missing directory",
+		"name= given twice",
+		"missing command",
+	}
+	if len(list) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)
+	}
+	for i, w := range want {
+		if list[i].Line != i+1 || !strings.Contains(list[i].Msg, w) {
+			t.Errorf("error %d = line %d %q, want line %d containing %q", i, list[i].Line, list[i].Msg, i+1, w)
+		}
+	}
+}
+
+func TestDuplicateNames(t *testing.T) {
+	src := `every 1m ./sync.sh
+every 1m name=sync ./other.sh
+every 1m name=ping true
+every 2m name=ping false
+`
+	tasks, err := Parse(strings.NewReader(src))
+	var list ErrorList
+	if !errors.As(err, &list) || len(list) != 1 {
+		t.Fatalf("err = %v, want one error", err)
+	}
+	if list[0].Line != 4 || !strings.Contains(list[0].Msg, `duplicate task name "ping" (also on line 3)`) {
+		t.Errorf("error = %v", list[0])
+	}
+	// An explicit name wins; the derived one moves aside.
+	if tasks[0].Name != "sync-2" || tasks[1].Name != "sync" {
+		t.Errorf("names = %q, %q", tasks[0].Name, tasks[1].Name)
 	}
 }
 
