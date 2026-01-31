@@ -84,6 +84,32 @@ func Exec(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
 	}
 }
 
+// RunOnce executes one run of t, logging when it starts and how it ended.
+// It returns the run's error unless the task allows failure.
+func RunOnce(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
+	out.Eventf(t.Name, "run %d started", run)
+	start := time.Now()
+	err := Exec(ctx, t, run, out)
+	took := elapsed(time.Since(start))
+	note := ""
+	if t.AllowFail {
+		note = ", ignored: onfail=continue"
+	}
+	var timeout *TimeoutError
+	switch {
+	case err == nil:
+		out.Eventf(t.Name, "run %d ok (%s)", run, took)
+	case errors.As(err, &timeout):
+		out.Eventf(t.Name, "run %d %v, process group killed%s", run, err, note)
+	default:
+		out.Eventf(t.Name, "run %d failed: %v (%s%s)", run, err, took, note)
+	}
+	if t.AllowFail {
+		return nil
+	}
+	return err
+}
+
 // elapsed formats a run time with sensible precision.
 func elapsed(d time.Duration) string {
 	switch {

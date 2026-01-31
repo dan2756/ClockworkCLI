@@ -54,6 +54,33 @@ Mon 2026-01-26 09:15 EST  in 13h24m
 Mon 2026-01-26 09:30 EST  in 13h39m
 ```
 
+## Running
+
+`cronlite run` stays in the foreground. Task output goes to stdout and
+stderr, each line prefixed with a timestamp and the task name; cronlite's own
+messages go to stderr and are marked with `--`:
+
+```
+2026-01-31 21:07:40 [ping] -- run 1 started
+2026-01-31 21:07:40 [ping] {"status":"ok"}
+2026-01-31 21:07:40 [ping] -- run 1 ok (112ms)
+2026-01-31 21:07:50 [sync] -- skipped: still running
+```
+
+A task never overlaps itself: if it is still running when it is due again,
+that run is skipped and logged. Runs missed while the machine was asleep are
+dropped rather than fired in a burst.
+
+| Flag           | Meaning                                                          |
+|----------------|------------------------------------------------------------------|
+| `-f FILE`      | task file to use                                                 |
+| `--jitter DUR` | delay every run by a random amount up to `DUR` (`jitter=` wins)  |
+| `--grace DUR`  | on shutdown, how long to wait for running tasks (default `10s`)  |
+
+On SIGINT or SIGTERM cronlite stops scheduling, waits up to `--grace` for
+running tasks to finish, then kills their process groups. A second Ctrl-C
+kills them right away.
+
 ### Task options
 
 Options go between the schedule and the command:

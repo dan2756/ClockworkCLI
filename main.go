@@ -31,14 +31,21 @@ const (
 const usage = `cronlite runs commands on intervals from a plain text file.
 
 Usage:
-  cronlite run   [-f FILE]          run the scheduler in the foreground
-  cronlite check [-f FILE]          validate the task file
-  cronlite next  EXPR [-n COUNT]    print the next fire times of a cron expression
+  cronlite run   [-f FILE] [--jitter DUR] [--grace DUR]
+  cronlite check [-f FILE]
+  cronlite next  EXPR [-n COUNT]
+
+Commands:
+  run     run the scheduler in the foreground until Ctrl-C
+  check   validate the task file, printing errors with line numbers
+  next    print the next fire times of a cron expression
 
 Options:
-  -f FILE      task file (default ./cronlite.txt, else ~/.config/cronlite/tasks)
-  -h, --help   show help
-  --version    print the version
+  -f FILE        task file (default ./cronlite.txt, else ~/.config/cronlite/tasks)
+  --jitter DUR   run: delay each run by a random amount up to DUR
+  --grace DUR    run: on shutdown, wait this long for running tasks (default 10s)
+  -h, --help     show help
+  --version      print the version
 
 Task file:
   every 5m                    ./scripts/sync.sh
@@ -203,7 +210,11 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
 	var file string
+	jitter := durationFlag(0)
+	grace := durationFlag(10 * time.Second)
 	fs := newFlags("run", stderr, &file)
+	fs.Var(&jitter, "jitter", "delay each run by a random amount up to `DUR` (tasks may set their own)")
+	fs.Var(&grace, "grace", "on shutdown, wait up to `DUR` for running tasks before killing them")
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
@@ -216,14 +227,52 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return exitFail
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	out := &runner.Output{Stdout: stdout, Stderr: stderr}
+	s := runner.NewScheduler(out)
+	s.Jitter = time.Duration(jitter)
+	s.Grace = time.Duration(grace)
+	s.Load(tasks, time.Now())
 	out.Eventf("cronlite", "loaded %d %s from %s", len(tasks), plural(len(tasks), "task", "tasks"), path)
-	runner.Run(ctx, tasks, out)
+
+	// The first signal stops scheduling and lets running tasks finish; a
+	// second one kills them.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	go func() {
+		sig, ok := <-sigs
+		if !ok {
+			return
+		}
+		out.Eventf("cronlite", "%v: shutting down (send again to kill running tasks)", sig)
+		cancel()
+		if _, ok := <-sigs; ok {
+			s.Kill()
+		}
+	}()
+
+	s.Run(ctx)
 	out.Eventf("cronlite", "stopped")
 	return exitOK
+}
+
+// durationFlag is a flag.Value accepting ParseDuration syntax.
+type durationFlag time.Duration
+
+func (d *durationFlag) String() string { return schedule.FormatDuration(time.Duration(*d)) }
+
+func (d *durationFlag) Set(s string) error {
+	v, err := schedule.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	if v < 0 {
+		return fmt.Errorf("must not be negative")
+	}
+	*d = durationFlag(v)
+	return nil
 }
 
 func cmdNext(args []string, stdout, stderr io.Writer) int {
