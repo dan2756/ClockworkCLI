@@ -2,20 +2,14 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime/debug"
-	"syscall"
-	"time"
 
-	"github.com/dan2756/cronlite/internal/runner"
-	"github.com/dan2756/cronlite/internal/schedule"
 	"github.com/dan2756/cronlite/internal/taskfile"
 )
 
@@ -23,21 +17,26 @@ import (
 var version = "dev"
 
 const (
-	exitOK    = 0
-	exitFail  = 1
-	exitUsage = 2
+	exitOK          = 0
+	exitFail        = 1 // a task failed, or the task file is invalid
+	exitUsage       = 2
+	exitInterrupted = 130
 )
 
 const usage = `cronlite runs commands on intervals from a plain text file.
 
 Usage:
   cronlite run   [-f FILE] [--jitter DUR] [--grace DUR]
+  cronlite list  [-f FILE]
   cronlite check [-f FILE]
+  cronlite once  [-f FILE]
   cronlite next  EXPR [-n COUNT]
 
 Commands:
   run     run the scheduler in the foreground until Ctrl-C
+  list    show each task with its schedule and next run time
   check   validate the task file, printing errors with line numbers
+  once    run every task once, one after another; exit 1 if any failed
   next    print the next fire times of a cron expression
 
 Options:
@@ -80,8 +79,12 @@ func cli(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "run":
 		return cmdRun(args[1:], stdout, stderr)
+	case "list", "ls":
+		return cmdList(args[1:], stdout, stderr)
 	case "check":
 		return cmdCheck(args[1:], stdout, stderr)
+	case "once":
+		return cmdOnce(args[1:], stdout, stderr)
 	case "next":
 		return cmdNext(args[1:], stdout, stderr)
 	}
@@ -192,144 +195,4 @@ func printParseError(w io.Writer, path string, err error) {
 		return
 	}
 	fmt.Fprintln(w, "cronlite:", err)
-}
-
-func cmdCheck(args []string, stdout, stderr io.Writer) int {
-	var file string
-	fs := newFlags("check", stderr, &file)
-	if code, ok := parseFlags(fs, args); !ok {
-		return code
-	}
-	path, tasks, ok := loadTasks(file, stderr)
-	if !ok {
-		return exitFail
-	}
-	fmt.Fprintf(stdout, "%s: %d %s OK\n", path, len(tasks), plural(len(tasks), "task", "tasks"))
-	return exitOK
-}
-
-func cmdRun(args []string, stdout, stderr io.Writer) int {
-	var file string
-	jitter := durationFlag(0)
-	grace := durationFlag(10 * time.Second)
-	fs := newFlags("run", stderr, &file)
-	fs.Var(&jitter, "jitter", "delay each run by a random amount up to `DUR` (tasks may set their own)")
-	fs.Var(&grace, "grace", "on shutdown, wait up to `DUR` for running tasks before killing them")
-	if code, ok := parseFlags(fs, args); !ok {
-		return code
-	}
-	path, tasks, ok := loadTasks(file, stderr)
-	if !ok {
-		return exitFail
-	}
-	if len(tasks) == 0 {
-		fmt.Fprintf(stderr, "cronlite: no tasks in %s\n", path)
-		return exitFail
-	}
-
-	out := &runner.Output{Stdout: stdout, Stderr: stderr}
-	s := runner.NewScheduler(out)
-	s.Jitter = time.Duration(jitter)
-	s.Grace = time.Duration(grace)
-	s.Load(tasks, time.Now())
-	out.Eventf("cronlite", "loaded %d %s from %s", len(tasks), plural(len(tasks), "task", "tasks"), path)
-
-	// The first signal stops scheduling and lets running tasks finish; a
-	// second one kills them.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigs)
-	go func() {
-		sig, ok := <-sigs
-		if !ok {
-			return
-		}
-		out.Eventf("cronlite", "%v: shutting down (send again to kill running tasks)", sig)
-		cancel()
-		if _, ok := <-sigs; ok {
-			s.Kill()
-		}
-	}()
-
-	s.Run(ctx)
-	out.Eventf("cronlite", "stopped")
-	return exitOK
-}
-
-// durationFlag is a flag.Value accepting ParseDuration syntax.
-type durationFlag time.Duration
-
-func (d *durationFlag) String() string { return schedule.FormatDuration(time.Duration(*d)) }
-
-func (d *durationFlag) Set(s string) error {
-	v, err := schedule.ParseDuration(s)
-	if err != nil {
-		return err
-	}
-	if v < 0 {
-		return fmt.Errorf("must not be negative")
-	}
-	*d = durationFlag(v)
-	return nil
-}
-
-func cmdNext(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("cronlite next", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	count := fs.Int("n", 5, "number of fire times to print")
-	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), "Usage: cronlite next EXPR [-n COUNT]\n\n"+
-			"Prints the next fire times of a cron expression, e.g.\n"+
-			"  cronlite next \"*/15 9-17 * * 1-5\" -n 5\n\n")
-		fs.PrintDefaults()
-	}
-	pos, err := parseArgs(fs, args)
-	if err != nil {
-		return flagErrorCode(err)
-	}
-	if len(pos) != 1 {
-		fs.Usage()
-		return exitUsage
-	}
-	if *count < 1 {
-		fmt.Fprintln(stderr, "cronlite next: -n must be at least 1")
-		return exitUsage
-	}
-	c, err := schedule.ParseCron(pos[0])
-	if err != nil {
-		fmt.Fprintf(stderr, "cronlite next: %v\n", err)
-		return exitFail
-	}
-	now := time.Now()
-	t := now
-	for range *count {
-		if t = c.Next(t); t.IsZero() {
-			break
-		}
-		fmt.Fprintf(stdout, "%s  in %s\n", t.Format("Mon 2006-01-02 15:04 MST"), human(t.Sub(now)))
-	}
-	return exitOK
-}
-
-// human formats a duration for people, with no more precision than is
-// useful: "45s", "3m20s", "13h8m", "2d3h".
-func human(d time.Duration) string {
-	switch {
-	case d < time.Hour:
-		d = d.Round(time.Second)
-	case d < 24*time.Hour:
-		d = d.Round(time.Minute)
-	default:
-		d = d.Round(time.Hour)
-	}
-	return schedule.FormatDuration(d)
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
