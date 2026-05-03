@@ -43,12 +43,17 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
-	path, tasks, ok := loadTasks(file, stderr)
-	if !ok {
+	path, err := findTaskFile(file)
+	if err != nil {
+		fmt.Fprintln(stderr, "cronlite:", err)
 		return exitFail
 	}
-	if len(tasks) == 0 {
-		fmt.Fprintf(stderr, "cronlite: no tasks in %s\n", path)
+	// Stat the file before parsing it so that an edit made in between is
+	// picked up by the first poll.
+	src := runner.NewFileSource(path)
+	tasks, err := src.Load()
+	if err != nil {
+		printParseError(stderr, path, err)
 		return exitFail
 	}
 
@@ -57,7 +62,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	s.Jitter = time.Duration(jitter)
 	s.Grace = time.Duration(grace)
 	s.Load(tasks, time.Now())
-	out.Eventf("cronlite", "loaded %d %s from %s", len(tasks), plural(len(tasks), "task", "tasks"), path)
+	out.Eventf("cronlite", "loaded %d %s from %s; watching it for changes", len(tasks), plural(len(tasks), "task", "tasks"), path)
 
 	// The first signal stops scheduling and lets running tasks finish; a
 	// second one kills them.
@@ -74,7 +79,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		s.Kill()
 	}()
 
-	s.Run(ctx)
+	s.Run(ctx, src)
 	out.Eventf("cronlite", "stopped")
 	return exitOK
 }

@@ -3,6 +3,8 @@ package runner
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -241,7 +243,7 @@ func TestRunWithRealCommands(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
-	s.Run(ctx)
+	s.Run(ctx, nil)
 
 	if !strings.Contains(stderr.String(), "[slow] -- skipped: still running") {
 		t.Errorf("no skipped runs logged:\n%s", stderr.String())
@@ -251,5 +253,145 @@ func TestRunWithRealCommands(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "killing") {
 		t.Errorf("run was killed instead of finishing during the grace period:\n%s", stderr.String())
+	}
+}
+
+func TestLoadKeepsScheduleOfUnchangedTasks(t *testing.T) {
+	a := task("a", "true")
+	b := task("b", "true")
+	b.Schedule = schedule.Every{Interval: 5 * time.Minute}
+	s, f, _ := testScheduler(a, b)
+	defer s.Kill()
+	s.tick(t0.Add(time.Minute)) // a runs and stays busy
+	expectRun(t, f, 1)
+
+	a2 := task("a", "true")
+	a2.Timeout = time.Second // changed, but same schedule
+	b2 := task("b", "true")
+	b2.Schedule = schedule.Every{Interval: 10 * time.Minute}
+	c := task("c", "true")
+	reloadAt := t0.Add(90 * time.Second)
+	ch := s.Load([]*taskfile.Task{a2, b2, c}, reloadAt)
+	if want := (Changes{Added: 1, Changed: 2}); ch != want {
+		t.Errorf("changes = %+v, want %+v", ch, want)
+	}
+	next := map[string]time.Time{}
+	for _, e := range s.entries {
+		next[e.task.Name] = e.next
+	}
+	if want := t0.Add(2 * time.Minute); !next["a"].Equal(want) {
+		t.Errorf("a: next = %v, want %v (kept)", next["a"], want)
+	}
+	if want := reloadAt.Add(10 * time.Minute); !next["b"].Equal(want) {
+		t.Errorf("b: next = %v, want %v (rescheduled)", next["b"], want)
+	}
+	if want := reloadAt.Add(time.Minute); !next["c"].Equal(want) {
+		t.Errorf("c: next = %v, want %v (new)", next["c"], want)
+	}
+
+	// a's first run is still going, so the reloaded a must not overlap it.
+	s.tick(t0.Add(2 * time.Minute))
+	expectNoRun(t, f)
+
+	if ch := s.Load([]*taskfile.Task{a2}, reloadAt); ch != (Changes{Removed: 2}) {
+		t.Errorf("changes = %+v, want 2 removed", ch)
+	}
+	close(f.release)
+}
+
+func TestChangesString(t *testing.T) {
+	if got := (Changes{}).String(); got != "no changes" {
+		t.Errorf("got %q", got)
+	}
+	if got := (Changes{Added: 1, Removed: 2}).String(); got != "1 added, 2 removed" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func writeFile(t *testing.T, path, content string, mod time.Time) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileSourceWaitsForWritesToSettle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks")
+	writeFile(t, path, "every 1m true\n", t0)
+	src := NewFileSource(path)
+	if src.Changed() {
+		t.Fatal("unchanged file reported as changed")
+	}
+	writeFile(t, path, "every 2m true\n", t0.Add(time.Second))
+	if src.Changed() {
+		t.Error("change reported before it settled")
+	}
+	if !src.Changed() {
+		t.Error("settled change not reported")
+	}
+	if src.Changed() {
+		t.Error("change reported twice")
+	}
+	os.Remove(path)
+	src.Changed()
+	if !src.Changed() {
+		t.Error("removal not reported")
+	}
+	if _, err := src.Load(); err == nil {
+		t.Error("Load of a missing file succeeded")
+	}
+}
+
+func TestRunReloadsChangedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cronlite.txt")
+	writeFile(t, path, "every 1h name=hourly true\n", t0)
+	var log safeBuffer
+	s := NewScheduler(&Output{Stdout: &log, Stderr: &log})
+	s.PollInterval = 10 * time.Millisecond
+	s.Exec = newFakeRuns().exec
+	src := NewFileSource(path)
+	tasks, err := src.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Load(tasks, time.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx, src)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitFor := func(substr string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !strings.Contains(log.String(), substr) {
+			if time.Now().After(deadline) {
+				t.Fatalf("log never contained %q:\n%s", substr, log.String())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	writeFile(t, path, "every 1h name=hourly true\nevery soon broken\n", t0.Add(time.Second))
+	waitFor(path + ":2: every: invalid duration")
+	waitFor("not reloaded; keeping the previous schedule")
+
+	writeFile(t, path, "every 1h name=hourly true\nat 09:00 name=morning true\n", t0.Add(2*time.Second))
+	waitFor("reloaded " + path + ": 2 tasks (1 added)")
+
+	s.mu.Lock()
+	n := len(s.entries)
+	s.mu.Unlock()
+	if n != 2 {
+		t.Errorf("%d tasks scheduled after reload, want 2", n)
 	}
 }

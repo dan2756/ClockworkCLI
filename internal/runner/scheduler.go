@@ -2,7 +2,10 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +30,9 @@ type Scheduler struct {
 	Exec   Executor      // defaults to RunOnce
 	Jitter time.Duration // random delay for tasks without jitter= of their own
 	Grace  time.Duration // how long Shutdown waits for running tasks
+
+	// PollInterval is how often Run checks its Source for changes.
+	PollInterval time.Duration
 
 	rand func(time.Duration) time.Duration
 
@@ -53,9 +59,10 @@ type taskState struct {
 // NewScheduler returns a scheduler that writes to out.
 func NewScheduler(out *Output) *Scheduler {
 	s := &Scheduler{
-		Out:   out,
-		rand:  func(d time.Duration) time.Duration { return rand.N(d) },
-		state: make(map[string]*taskState),
+		Out:          out,
+		PollInterval: 2 * time.Second,
+		rand:         func(d time.Duration) time.Duration { return rand.N(d) },
+		state:        make(map[string]*taskState),
 	}
 	s.Exec = func(ctx context.Context, t *taskfile.Task, run int) error {
 		return RunOnce(ctx, t, run, s.Out)
@@ -65,24 +72,84 @@ func NewScheduler(out *Output) *Scheduler {
 	return s
 }
 
-// Load replaces the scheduled tasks, computing each one's next fire time
-// from now.
-func (s *Scheduler) Load(tasks []*taskfile.Task, now time.Time) {
+// Changes summarizes what a Load changed.
+type Changes struct {
+	Added, Changed, Removed int
+}
+
+func (c Changes) String() string {
+	var parts []string
+	if c.Added > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", c.Added))
+	}
+	if c.Changed > 0 {
+		parts = append(parts, fmt.Sprintf("%d changed", c.Changed))
+	}
+	if c.Removed > 0 {
+		parts = append(parts, fmt.Sprintf("%d removed", c.Removed))
+	}
+	if len(parts) == 0 {
+		return "no changes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Load replaces the scheduled tasks. Tasks are matched to the previous
+// ones by name: one whose schedule is unchanged keeps its next fire time,
+// so editing the file does not restart every interval, while new and
+// rescheduled tasks count from now. Runs in flight are left alone, and a
+// task that is still running keeps being skipped until it finishes.
+func (s *Scheduler) Load(tasks []*taskfile.Task, now time.Time) Changes {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries = s.entries[:0]
+	old := make(map[string]*entry, len(s.entries))
+	for _, e := range s.entries {
+		old[e.task.Name] = e
+	}
+	var ch Changes
+	entries := make([]*entry, 0, len(tasks))
 	for _, t := range tasks {
-		e := &entry{task: t, next: t.Schedule.Next(now)}
-		if e.next.IsZero() {
+		e := &entry{task: t}
+		prev, ok := old[t.Name]
+		delete(old, t.Name)
+		switch {
+		case !ok:
+			ch.Added++
+		case !sameTask(prev.task, t):
+			ch.Changed++
+		}
+		if ok && prev.task.Schedule.String() == t.Schedule.String() {
+			e.next = prev.next
+		} else if e.next = t.Schedule.Next(now); e.next.IsZero() {
 			s.Out.Eventf(t.Name, "never fires")
 		}
-		s.entries = append(s.entries, e)
+		entries = append(entries, e)
 	}
+	ch.Removed = len(old)
+	s.entries = entries
+	return ch
+}
+
+func sameTask(a, b *taskfile.Task) bool {
+	return a.Schedule.String() == b.Schedule.String() &&
+		a.Command == b.Command &&
+		a.Dir == b.Dir &&
+		a.Timeout == b.Timeout &&
+		a.Jitter == b.Jitter &&
+		a.AllowFail == b.AllowFail
 }
 
 // Run fires tasks as they come due until ctx is cancelled, then shuts
-// down gracefully.
-func (s *Scheduler) Run(ctx context.Context) {
+// down gracefully. If src is not nil it is polled every PollInterval and
+// the tasks are reloaded when it changes; if the new tasks do not load,
+// the errors are logged and the current schedule stays in place.
+func (s *Scheduler) Run(ctx context.Context, src Source) {
+	var poll <-chan time.Time
+	if src != nil {
+		ticker := time.NewTicker(s.PollInterval)
+		defer ticker.Stop()
+		poll = ticker.C
+	}
 	for {
 		now := time.Now()
 		wait := maxWait
@@ -95,9 +162,33 @@ func (s *Scheduler) Run(ctx context.Context) {
 			timer.Stop()
 			s.Shutdown()
 			return
+		case <-poll:
+			timer.Stop()
+			s.reload(src)
 		case <-timer.C:
 		}
 	}
+}
+
+func (s *Scheduler) reload(src Source) {
+	if !src.Changed() {
+		return
+	}
+	tasks, err := src.Load()
+	if err != nil {
+		var list taskfile.ErrorList
+		if errors.As(err, &list) {
+			for _, e := range list {
+				s.Out.Eventf("cronlite", "%s:%d: %s", src.Name(), e.Line, e.Msg)
+			}
+		} else {
+			s.Out.Eventf("cronlite", "%v", err)
+		}
+		s.Out.Eventf("cronlite", "%s not reloaded; keeping the previous schedule", src.Name())
+		return
+	}
+	ch := s.Load(tasks, time.Now())
+	s.Out.Eventf("cronlite", "reloaded %s: %d %s (%s)", src.Name(), len(tasks), plural(len(tasks), "task", "tasks"), ch)
 }
 
 // tick fires every task that is due at now and returns the earliest
