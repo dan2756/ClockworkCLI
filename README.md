@@ -161,6 +161,12 @@ pipes, redirects, `&&` and quoting all work as in a shell.
   fields are restricted, a day matching either one fires. Dates that can
   never happen, such as `30 feb`, are rejected.
 
+`at` and `cron` follow the local wall clock, including across daylight
+saving changes. When clocks spring forward, a time that does not exist that
+day (02:30, say) runs at the moment of the jump instead of being skipped.
+When clocks fall back, a time that happens twice runs only the first time.
+`every` is unaffected: it counts real elapsed time.
+
 ### Options
 
 Options go between the schedule and the command:

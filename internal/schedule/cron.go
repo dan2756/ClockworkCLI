@@ -201,13 +201,3 @@ func (c *Cron) Next(t time.Time) time.Time {
 func (c *Cron) Expr() string { return c.expr }
 
 func (c *Cron) String() string { return `cron "` + c.expr + `"` }
-
-// civil returns t's wall clock reading as a UTC time.
-func civil(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
-}
-
-// inZone returns the instant in loc whose wall clock reads w (from civil).
-func inZone(w time.Time, loc *time.Location) time.Time {
-	return time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, loc)
-}
