@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +113,41 @@ func TestRunOnceAllowFail(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("log missing %q:\n%s", want, log)
 		}
+	}
+}
+
+func TestExecDoesNotWaitForBackgroundProcesses(t *testing.T) {
+	var stdout, stderr safeBuffer
+	o := &Output{Stdout: &stdout, Stderr: &stderr}
+	tk := task("bg", "(sleep 2.5; echo late) & echo early")
+	start := time.Now()
+	if err := Exec(context.Background(), tk, 4, o); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("Exec took %v; it waited for the background process", took)
+	}
+	if !strings.Contains(stdout.String(), "[bg] early") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "[bg] -- run 4 left a background process holding its output") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	// The background process's output still arrives, prefixed as usual.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(stdout.String(), "[bg] late") {
+		if time.Now().After(deadline) {
+			t.Fatalf("background output never arrived: %q", stdout.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestExecStartFailure(t *testing.T) {
+	o, _, _ := fixedOutput()
+	tk := task("nodir", "true")
+	tk.Dir = filepath.Join(t.TempDir(), "missing")
+	if err := Exec(context.Background(), tk, 1, o); err == nil {
+		t.Error("Exec in a missing directory succeeded")
 	}
 }

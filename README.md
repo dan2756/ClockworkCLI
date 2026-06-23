@@ -187,6 +187,10 @@ several share one.
 On timeout cronlite sends SIGTERM to the task's process group, and SIGKILL
 two seconds later if anything is left.
 
+A run ends when its shell exits. If the command starts something in the
+background (`./server &`), cronlite does not wait for it, but keeps showing
+its output under the task's name.
+
 ### Environment
 
 Each run gets these on top of cronlite's own environment:

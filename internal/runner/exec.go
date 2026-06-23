@@ -3,9 +3,11 @@ package runner
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,40 +34,111 @@ func (e *TimeoutError) Error() string {
 // and waits for it to exit. Output is line-prefixed onto out, and the
 // command sees CRONLITE_TASK and CRONLITE_RUN in its environment.
 //
+// A run ends when the shell exits. Anything it left running in the
+// background keeps its output flowing to out, but is not waited for.
+//
 // When the task's timeout expires the whole process group gets SIGTERM,
 // then SIGKILL if it is still around shortly after. Cancelling ctx kills
 // the group at once.
 func Exec(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
-	stdout := out.lineWriter(out.Stdout, t.Name)
-	stderr := out.lineWriter(out.Stderr, t.Name)
-	defer stdout.Flush()
-	defer stderr.Flush()
-
 	cmd := exec.Command("/bin/sh", "-c", t.Command)
 	cmd.Dir = t.Dir
 	cmd.Env = append(os.Environ(),
 		"CRONLITE_TASK="+t.Name,
 		"CRONLITE_RUN="+strconv.Itoa(run),
 	)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 	setProcessGroup(cmd)
-	if err := cmd.Start(); err != nil {
+	started, copied, err := pipeOutput(cmd, out, t.Name)
+	if err != nil {
 		return err
 	}
+	err = cmd.Start()
+	started()
+	if err != nil {
+		return err
+	}
+	err = wait(ctx, cmd, t.Timeout)
+
+	// Normally the pipes hit EOF as soon as the shell exits. If they do not,
+	// a background process still holds them; let it keep writing.
+	select {
+	case <-copied:
+	case <-time.After(outputWait):
+		out.Eventf(t.Name, "run %d left a background process holding its output", run)
+	}
+	return err
+}
+
+// outputWait is how long Exec waits for a finished command's output to
+// drain before leaving the rest to background readers.
+const outputWait = time.Second
+
+// pipeOutput connects the command's stdout and stderr to line writers via
+// OS pipes. Handing exec.Cmd plain writers instead would make Wait block
+// until every process holding the pipes exits, so a task that starts
+// something in the background would look busy for as long as that runs.
+//
+// started must be called once the command has started (or failed to);
+// copied is closed when both pipes have been drained.
+func pipeOutput(cmd *exec.Cmd, out *Output, name string) (started func(), copied <-chan struct{}, err error) {
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return nil, nil, err
+	}
+	cmd.Stdout, cmd.Stderr = outW, errW
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, p := range []struct {
+		r *os.File
+		w *lineWriter
+	}{
+		{outR, out.lineWriter(out.Stdout, name)},
+		{errR, out.lineWriter(out.Stderr, name)},
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(p.w, p.r)
+			p.w.Flush()
+			p.r.Close()
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	// Once the child has its copies, ours must go, or the readers would
+	// never see EOF.
+	started = func() {
+		outW.Close()
+		errW.Close()
+	}
+	return started, done, nil
+}
+
+// wait waits for the started command, enforcing its timeout and killing
+// it if ctx is cancelled.
+func wait(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	var timeout <-chan time.Time
-	if t.Timeout > 0 {
-		timer := time.NewTimer(t.Timeout)
+	var expired <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
-		timeout = timer.C
+		expired = timer.C
 	}
 	select {
 	case err := <-done:
 		return err
-	case <-timeout:
+	case <-expired:
 		signalGroup(cmd, syscall.SIGTERM)
 		select {
 		case <-done:
@@ -76,7 +149,7 @@ func Exec(ctx context.Context, t *taskfile.Task, run int, out *Output) error {
 			signalGroup(cmd, syscall.SIGKILL)
 			<-done
 		}
-		return &TimeoutError{After: t.Timeout}
+		return &TimeoutError{After: timeout}
 	case <-ctx.Done():
 		signalGroup(cmd, syscall.SIGKILL)
 		<-done
