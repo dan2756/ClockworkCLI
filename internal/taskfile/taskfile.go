@@ -400,11 +400,11 @@ func (l *lexer) word() (string, error) {
 	return b.String(), nil
 }
 
-// cronExpr reads a cron expression: either one quoted word or five
-// unquoted fields.
+// cronExpr reads a cron expression: one quoted word, a nickname such as
+// @daily, or five unquoted fields.
 func (l *lexer) cronExpr() (string, error) {
 	l.skipSpace()
-	if l.pos < len(l.s) && (l.s[l.pos] == '"' || l.s[l.pos] == '\'') {
+	if l.pos < len(l.s) && (l.s[l.pos] == '"' || l.s[l.pos] == '\'' || l.s[l.pos] == '@') {
 		expr, err := l.word()
 		if err != nil {
 			return "", fmt.Errorf("cron: %v", err)

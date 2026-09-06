@@ -146,7 +146,7 @@ pipes, redirects, `&&` and quoting all work as in a shell.
 |------------------------------|----------------------------------------------------------------|
 | `every <duration>`           | `every 90s`, `every 1h30m`, `every 2d`                         |
 | `at HH:MM[,HH:MM...] [days]` | `at 09:00`, `at 09:00,13:30 weekdays`, `at 18:00 mon,wed,fri`  |
-| `cron "<5-field expr>"`      | `cron "*/15 9-17 * * 1-5"`, `cron "0 3 1 * *"`                 |
+| `cron "<5-field expr>"`      | `cron "*/15 9-17 * * 1-5"`, `cron "0 3 1 * *"`, `cron @daily`  |
 
 - **every** uses Go duration syntax (`10s`, `5m`, `1h30m`, `250ms`) plus
   `d` for days. The first run comes one interval after `cronlite run`
@@ -159,7 +159,9 @@ pipes, redirects, `&&` and quoting all work as in a shell.
   `9-17/2`) and names (`jan`-`dec`, `sun`-`sat`; `0` and `7` are both
   Sunday). As in classic cron, if both the day-of-month and day-of-week
   fields are restricted, a day matching either one fires. Dates that can
-  never happen, such as `30 feb`, are rejected.
+  never happen, such as `30 feb`, are rejected. The nicknames `@hourly`,
+  `@daily` (`@midnight`), `@weekly`, `@monthly` and `@yearly`
+  (`@annually`) work too, quoted or not: `cron @daily ./rotate-logs.sh`.
 
 `at` and `cron` follow the local wall clock, including across daylight
 saving changes. When clocks spring forward, a time that does not exist that

@@ -170,3 +170,36 @@ func TestCronString(t *testing.T) {
 		t.Errorf("String = %s", got)
 	}
 }
+
+func TestParseCronNicknames(t *testing.T) {
+	tests := []struct{ nick, same string }{
+		{"@yearly", "0 0 1 1 *"},
+		{"@annually", "0 0 1 1 *"},
+		{"@monthly", "0 0 1 * *"},
+		{"@weekly", "0 0 * * 0"},
+		{"@daily", "0 0 * * *"},
+		{"@midnight", "0 0 * * *"},
+		{"@hourly", "0 * * * *"},
+		{" @Daily ", "0 0 * * *"},
+	}
+	from := utc("2026-09-06 22:56")
+	for _, tt := range tests {
+		c := mustCron(t, tt.nick)
+		want := mustCron(t, tt.same)
+		for i, at := 0, from; i < 3; i++ {
+			got, exp := c.Next(at), want.Next(at)
+			if !got.Equal(exp) {
+				t.Errorf("%s: fire %d = %v, want %v", tt.nick, i+1, got, exp)
+			}
+			at = got
+		}
+	}
+	if got := mustCron(t, "@Daily").String(); got != `cron "@daily"` {
+		t.Errorf("String = %s", got)
+	}
+	for _, bad := range []string{"@reboot", "@often", "@"} {
+		if _, err := ParseCron(bad); err == nil {
+			t.Errorf("ParseCron(%q) succeeded", bad)
+		}
+	}
+}

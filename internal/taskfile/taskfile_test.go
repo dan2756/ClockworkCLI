@@ -227,6 +227,8 @@ func TestParseCron(t *testing.T) {
 	src := `cron "*/15 9-17 * * 1-5"  ./check-queue.sh
 cron '0 3 * * sun' ./weekly.sh
 cron 0 12 1 * *   echo "first of the month"
+cron @hourly  ./hourly.sh --quiet
+cron "@weekly" ./weekly-report.sh
 `
 	tasks, err := Parse(strings.NewReader(src))
 	if err != nil {
@@ -236,6 +238,8 @@ cron 0 12 1 * *   echo "first of the month"
 		{`cron "*/15 9-17 * * 1-5"`, "./check-queue.sh"},
 		{`cron "0 3 * * sun"`, "./weekly.sh"},
 		{`cron "0 12 1 * *"`, `echo "first of the month"`},
+		{`cron "@hourly"`, "./hourly.sh --quiet"},
+		{`cron "@weekly"`, "./weekly-report.sh"},
 	}
 	for i, w := range want {
 		if got := tasks[i].Schedule.String(); got != w.sched {
@@ -253,6 +257,7 @@ cron "61 * * * *" ./x.sh
 cron "* * * *" ./x.sh
 cron "0 0 30 2 *" ./never.sh
 cron "* * * * *
+cron @reboot ./startup.sh
 `
 	_, err := Parse(strings.NewReader(src))
 	var list ErrorList
@@ -265,6 +270,7 @@ cron "* * * * *
 		"cron: want 5 fields",
 		"cron: day-of-month 30 never occurs in month 2",
 		"cron: unterminated",
+		"cron: @reboot is not supported",
 	}
 	if len(list) != len(want) {
 		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)

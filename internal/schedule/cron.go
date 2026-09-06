@@ -17,7 +17,8 @@ import (
 //
 // As in classic cron, when both day-of-month and day-of-week are
 // restricted (neither starts with *), a day matches if either field
-// matches.
+// matches. The nicknames @hourly, @daily, @weekly, @monthly and @yearly are
+// accepted too.
 type Cron struct {
 	expr   string
 	minute uint64
@@ -45,8 +46,37 @@ var cronFields = [5]cronField{
 		"sun", "mon", "tue", "wed", "thu", "fri", "sat"}},
 }
 
-// ParseCron parses a five-field cron expression.
+// cronMacros are the nicknames classic cron accepts in place of the five
+// fields.
+var cronMacros = map[string]string{
+	"@yearly":   "0 0 1 1 *",
+	"@annually": "0 0 1 1 *",
+	"@monthly":  "0 0 1 * *",
+	"@weekly":   "0 0 * * 0",
+	"@daily":    "0 0 * * *",
+	"@midnight": "0 0 * * *",
+	"@hourly":   "0 * * * *",
+}
+
+// ParseCron parses a five-field cron expression, or one of the nicknames
+// @yearly (or @annually), @monthly, @weekly, @daily (or @midnight) and
+// @hourly.
 func ParseCron(expr string) (*Cron, error) {
+	if name := strings.ToLower(strings.TrimSpace(expr)); strings.HasPrefix(name, "@") {
+		fields, ok := cronMacros[name]
+		if !ok {
+			if name == "@reboot" {
+				return nil, fmt.Errorf("@reboot is not supported")
+			}
+			return nil, fmt.Errorf("unknown nickname %q (want @yearly, @monthly, @weekly, @daily or @hourly)", name)
+		}
+		c, err := ParseCron(fields)
+		if err != nil {
+			return nil, err
+		}
+		c.expr = name
+		return c, nil
+	}
 	fields := strings.Fields(expr)
 	if len(fields) != 5 {
 		return nil, fmt.Errorf("want 5 fields (minute hour day-of-month month day-of-week), got %d", len(fields))
