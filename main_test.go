@@ -3,11 +3,23 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// TestMain lets a test run cronlite as a child process: with
+// CRONLITE_TEST_MAIN set, the test binary is cronlite.
+func TestMain(m *testing.M) {
+	if os.Getenv("CRONLITE_TEST_MAIN") != "" {
+		main()
+	}
+	os.Exit(m.Run())
+}
 
 func writeTasks(t *testing.T, src string) string {
 	t.Helper()
@@ -140,6 +152,28 @@ Fri 2026-01-23 16:45 UTC  in 45m
 		t.Errorf("got:\n%s\nwant:\n%s", stdout, want)
 	}
 
+	// Any task file schedule works, and --from moves the starting point.
+	code, stdout, _ = runCLI("next", "at 09:00 weekdays", "--from", "2026-03-06 10:00", "-n", "2")
+	want = `Mon 2026-03-09 09:00 UTC  in 2d23h
+Tue 2026-03-10 09:00 UTC  in 3d23h
+`
+	if code != exitOK || stdout != want {
+		t.Errorf("at schedule: code %d, got:\n%s\nwant:\n%s", code, stdout, want)
+	}
+	code, stdout, _ = runCLI("next", "--from=2026-01-01", "every 1d12h", "-n", "2")
+	want = `Fri 2026-01-02 12:00 UTC  in 1d12h
+Sun 2026-01-04 00:00 UTC  in 3d
+`
+	if code != exitOK || stdout != want {
+		t.Errorf("every schedule: code %d, got:\n%s\nwant:\n%s", code, stdout, want)
+	}
+	if code, _, _ := runCLI("next", "@daily", "--from", "tomorrow"); code != exitUsage {
+		t.Errorf("bad --from: code %d", code)
+	}
+	if code, _, stderr := runCLI("next", "at 25:00"); code != exitFail || !strings.Contains(stderr, "invalid time") {
+		t.Errorf("bad at schedule: code %d, stderr %q", code, stderr)
+	}
+
 	if code, _, stderr := runCLI("next", "61 * * * *"); code != exitFail || !strings.Contains(stderr, "out of range") {
 		t.Errorf("bad expression: code %d, stderr %q", code, stderr)
 	}
@@ -148,6 +182,72 @@ Fri 2026-01-23 16:45 UTC  in 45m
 	}
 	if code, _, _ := runCLI("next", "* * * * *", "-n", "0"); code != exitUsage {
 		t.Errorf("-n 0: code %d", code)
+	}
+}
+
+func TestRunSurvivesClosedOutputAndStopsOnHangup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs cronlite and real tasks")
+	}
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored (nohup)")
+	}
+	path := writeTasks(t, "every 200ms name=chatty echo hello\nevery 200ms name=quiet sleep 30\n")
+	logPath := filepath.Join(t.TempDir(), "stderr")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	// Nobody reads stdout, as with "cronlite run | tee log" once tee is gone.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+
+	cmd := exec.Command(os.Args[0], "run", "-f", path, "--grace", "200ms")
+	cmd.Env = append(os.Environ(), "CRONLITE_TEST_MAIN=1")
+	cmd.Stdout, cmd.Stderr = w, logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	defer cmd.Process.Kill()
+	log := func() string {
+		b, _ := os.ReadFile(logPath)
+		return string(b)
+	}
+
+	// chatty's output has hit the closed pipe by the time its second run
+	// is over; quiet is still running when the terminal hangs up.
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(log(), "[chatty] -- run 2 ok") || !strings.Contains(log(), "[quiet] -- run 1 started") {
+		select {
+		case err := <-exited:
+			t.Fatalf("cronlite exited early: %v\n%s", err, log())
+		case <-deadline:
+			t.Fatalf("tasks never ran:\n%s", log())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("cronlite: %v\n%s", err, log())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("cronlite did not stop after SIGHUP:\n%s", log())
+	}
+	for _, want := range []string{"hangup: shutting down", "killing 1 running task", "[cronlite] -- stopped"} {
+		if !strings.Contains(log(), want) {
+			t.Errorf("log missing %q:\n%s", want, log())
+		}
 	}
 }
 

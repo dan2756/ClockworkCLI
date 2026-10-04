@@ -15,3 +15,7 @@ func signalGroup(cmd *exec.Cmd, sig syscall.Signal) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// groupAlive reports false: without process groups nothing is left to
+// look for once the command has exited.
+func groupAlive(cmd *exec.Cmd) bool { return false }

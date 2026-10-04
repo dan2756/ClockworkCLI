@@ -14,6 +14,7 @@ import (
 
 	"github.com/dan2756/cronlite/internal/runner"
 	"github.com/dan2756/cronlite/internal/schedule"
+	"github.com/dan2756/cronlite/internal/taskfile"
 )
 
 // now is the clock used by list and next; tests replace it.
@@ -57,6 +58,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return exitFail
 	}
 
+	defer survivePipeErrors()()
 	out := &runner.Output{Stdout: stdout, Stderr: stderr}
 	s := runner.NewScheduler(out)
 	s.Jitter = time.Duration(jitter)
@@ -69,7 +71,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigs, stopSignals()...)
 	defer signal.Stop(sigs)
 	go func() {
 		sig := <-sigs
@@ -120,6 +122,29 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// stopSignals returns the signals that make run and once stop their tasks:
+// Ctrl-C, kill, and the terminal going away. Tasks run in process groups
+// of their own, out of the terminal's reach, so cronlite must not just die
+// from any of these. SIGHUP is left alone when it is ignored (nohup).
+func stopSignals() []os.Signal {
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
+}
+
+// survivePipeErrors makes writes to a closed stdout or stderr fail instead
+// of killing cronlite with SIGPIPE, so that, for example, Ctrl-C on
+// "cronlite run | tee log" still shuts the tasks down properly. Tasks
+// still get the default SIGPIPE behaviour. Call the returned function to
+// undo it.
+func survivePipeErrors() (undo func()) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGPIPE)
+	return func() { signal.Stop(c) }
+}
+
 // formatTime prints a fire time, with seconds only when they matter.
 func formatTime(t time.Time) string {
 	if t.Second() != 0 {
@@ -139,7 +164,8 @@ func cmdOnce(args []string, stdout, stderr io.Writer) int {
 		return exitFail
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer survivePipeErrors()()
+	ctx, stop := signal.NotifyContext(context.Background(), stopSignals()...)
 	defer stop()
 
 	out := &runner.Output{Stdout: stdout, Stderr: stderr}
@@ -166,10 +192,16 @@ func cmdNext(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cronlite next", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	count := fs.Int("n", 5, "number of fire times to print")
+	from := fs.String("from", "", "start from `TIME` (YYYY-MM-DD [HH:MM], local time) instead of now")
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), "Usage: cronlite next EXPR [-n COUNT]\n\n"+
-			"Prints the next fire times of a cron expression, e.g.\n"+
-			"  cronlite next \"*/15 9-17 * * 1-5\" -n 5\n\n")
+		fmt.Fprint(fs.Output(), `Usage: cronlite next EXPR|SCHEDULE [-n COUNT] [--from TIME]
+
+Prints the next fire times of a cron expression or any task file schedule:
+  cronlite next "*/15 9-17 * * 1-5" -n 5
+  cronlite next "at 09:00,13:30 weekdays"
+  cronlite next "30 2 * * *" --from 2026-03-07
+
+`)
 		fs.PrintDefaults()
 	}
 	pos, err := parseArgs(fs, args)
@@ -184,20 +216,49 @@ func cmdNext(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "cronlite next: -n must be at least 1")
 		return exitUsage
 	}
-	c, err := schedule.ParseCron(pos[0])
+	sched, err := parseNextArg(pos[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "cronlite next: %v\n", err)
 		return exitFail
 	}
 	t0 := now()
+	if *from != "" {
+		if t0, err = parseTime(*from, t0.Location()); err != nil {
+			fmt.Fprintf(stderr, "cronlite next: --from: %v\n", err)
+			return exitUsage
+		}
+	}
 	t := t0
 	for range *count {
-		if t = c.Next(t); t.IsZero() {
+		if t = sched.Next(t); t.IsZero() {
 			break
 		}
 		fmt.Fprintf(stdout, "%s  in %s\n", t.Format("Mon 2006-01-02 15:04 MST"), human(t.Sub(t0)))
 	}
 	return exitOK
+}
+
+// parseNextArg accepts a bare cron expression or a full schedule as written
+// in a task file.
+func parseNextArg(s string) (schedule.Schedule, error) {
+	switch kw, _, _ := strings.Cut(strings.TrimSpace(s), " "); kw {
+	case "every", "at", "cron":
+		return taskfile.ParseSchedule(s)
+	}
+	return schedule.ParseCron(s)
+}
+
+// parseTime parses a date with an optional time of day in loc.
+func parseTime(s string, loc *time.Location) (time.Time, error) {
+	for _, layout := range []string{"2006-01-02 15:04", "2006-01-02T15:04", "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(loc), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid time %q (want YYYY-MM-DD or YYYY-MM-DD HH:MM)", s)
 }
 
 // durationFlag is a flag.Value accepting ParseDuration syntax.

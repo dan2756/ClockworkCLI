@@ -20,3 +20,9 @@ func signalGroup(cmd *exec.Cmd, sig syscall.Signal) {
 		_ = syscall.Kill(-cmd.Process.Pid, sig)
 	}
 }
+
+// groupAlive reports whether anything is left in the command's process
+// group, which can outlive the shell that leads it.
+func groupAlive(cmd *exec.Cmd) bool {
+	return cmd.Process != nil && syscall.Kill(-cmd.Process.Pid, 0) == nil
+}

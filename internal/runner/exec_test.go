@@ -56,7 +56,10 @@ func TestExecTimeoutKillsProcessGroup(t *testing.T) {
 	if !errors.As(err, &te) {
 		t.Fatalf("err = %v, want TimeoutError", err)
 	}
-	if took > 2*time.Second {
+	// The killed sleep stays in the group as a zombie until init reaps it,
+	// which some inits only do every so often, so Exec may wait for it
+	// until killDelay.
+	if took > killDelay+time.Second {
 		t.Errorf("Exec took %v; process group not killed", took)
 	}
 	if !strings.Contains(stdout.String(), "[slow] started") {
@@ -76,6 +79,28 @@ func TestExecTimeoutEscalatesToSIGKILL(t *testing.T) {
 	}
 	if took := time.Since(start); took > killDelay+2*time.Second {
 		t.Errorf("Exec took %v", took)
+	}
+}
+
+func TestExecTimeoutKillsWhatOutlivesTheShell(t *testing.T) {
+	var stdout, stderr safeBuffer
+	o := &Output{Stdout: &stdout, Stderr: &stderr}
+	// The shell dies from SIGTERM, but the inner one ignores it and keeps
+	// the output pipe open; only SIGKILL to the group gets rid of it.
+	tk := task("stubborn", `sh -c 'trap "" TERM; sleep 5'; echo after`)
+	tk.Timeout = 100 * time.Millisecond
+	start := time.Now()
+	err := Exec(context.Background(), tk, 1, o)
+	took := time.Since(start)
+	var te *TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("err = %v, want TimeoutError", err)
+	}
+	if took < killDelay || took > killDelay+2*time.Second {
+		t.Errorf("Exec took %v, want about %v (SIGTERM, then SIGKILL)", took, killDelay)
+	}
+	if strings.Contains(stderr.String(), "left a background process") {
+		t.Errorf("the process ignoring SIGTERM was not killed:\n%s", stderr.String())
 	}
 }
 

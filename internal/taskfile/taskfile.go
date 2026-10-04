@@ -39,6 +39,10 @@ type Task struct {
 	// AllowFail is set by onfail=continue: a failed run is reported but
 	// not treated as an error.
 	AllowFail bool
+	// AutoName is set when Name was derived from the command rather than
+	// given with name=. Such a name depends on the lines above it (sync,
+	// sync-2), so it can change when the file is edited.
+	AutoName bool
 }
 
 // Options lists the option keys accepted between the schedule and the
@@ -152,6 +156,20 @@ func parseLine(line string) (*Task, error) {
 	return t, nil
 }
 
+// ParseSchedule parses just the schedule part of a task line, such as
+// "every 5m", "at 09:00,13:30 weekdays" or `cron "*/15 9-17 * * 1-5"`.
+func ParseSchedule(s string) (schedule.Schedule, error) {
+	lx := &lexer{s: strings.TrimSpace(s)}
+	t := &Task{}
+	if err := parseSchedule(lx, t); err != nil {
+		return nil, err
+	}
+	if rest := lx.rest(); rest != "" {
+		return nil, fmt.Errorf("unexpected %q after %s", rest, t.Schedule)
+	}
+	return t.Schedule, nil
+}
+
 func parseSchedule(lx *lexer, t *Task) error {
 	kw, err := lx.word()
 	if err != nil {
@@ -190,9 +208,13 @@ func parseSchedule(lx *lexer, t *Task) error {
 		// An optional day filter may follow; anything else starts the command.
 		save := lx.pos
 		if w, err := lx.word(); err == nil && w != "" {
-			if days, err := schedule.ParseDays(w); err == nil {
+			days, err := schedule.ParseDays(w)
+			switch {
+			case err == nil:
 				a.Days = days
 				save = lx.pos
+			case meantAsDays(w):
+				return fmt.Errorf("at: %v (use e.g. weekdays, weekends, mon,wed,fri or mon-thu)", err)
 			}
 		}
 		lx.pos = save
@@ -211,6 +233,40 @@ func parseSchedule(lx *lexer, t *Task) error {
 		return fmt.Errorf("unknown schedule %q (want every, at or cron)", kw)
 	}
 	return nil
+}
+
+// meantAsDays reports whether a word after an at time that is not a valid
+// day filter was still meant as one, rather than as the start of the
+// command: a list ("mon,wed,fryday"), "weekday" or "weekend", or day names
+// cut short ("tues", "mon-thurs").
+func meantAsDays(w string) bool {
+	w = strings.ToLower(w)
+	if strings.ContainsFunc(w, func(r rune) bool { return (r < 'a' || r > 'z') && r != ',' && r != '-' }) {
+		return false
+	}
+	if strings.Contains(w, ",") || w == "weekday" || w == "weekend" {
+		return true
+	}
+	for _, part := range strings.Split(w, "-") {
+		if !isDayPrefix(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// isDayPrefix reports whether s is the start of a day name, at least three
+// letters long, such as "wed", "thurs" or "saturday".
+func isDayPrefix(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		if strings.HasPrefix(strings.ToLower(d.String()), s) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseOptions reads key=value options up to the first word that is not
@@ -306,7 +362,7 @@ func assignNames(tasks []*Task) []*Error {
 			name = fmt.Sprintf("%s-%d", base, n)
 		}
 		taken[name] = t.Line
-		t.Name = name
+		t.Name, t.AutoName = name, true
 	}
 	return errs
 }

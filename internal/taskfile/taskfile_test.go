@@ -100,9 +100,16 @@ every 1m ./sync.py
 	}
 	want := []string{"sync", "env", "backup.tar", "sync-2", "my-script", "sync-3"}
 	for i, w := range want {
-		if tasks[i].Name != w {
-			t.Errorf("task %d name = %q, want %q", i, tasks[i].Name, w)
+		if tasks[i].Name != w || !tasks[i].AutoName {
+			t.Errorf("task %d name = %q (auto %v), want %q (auto)", i, tasks[i].Name, tasks[i].AutoName, w)
 		}
+	}
+	named, err := Parse(strings.NewReader("every 1m name=sync ./scripts/sync.sh\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named[0].AutoName {
+		t.Error("name=sync: AutoName is set")
 	}
 }
 
@@ -288,6 +295,9 @@ at 09:00,13:30 weekdays  say "stretch"
 at 18:00 mon,wed,fri   ./gym.sh
 at 7:30 Weekends sleep 3600
 at 12:00 saybye
+at 03:00 mongodump --out /backup
+at 18:00 friday-backup
+at 06:00 LIST=a,b ./each.sh
 `
 	tasks, err := Parse(strings.NewReader(src))
 	if err != nil {
@@ -299,6 +309,9 @@ at 12:00 saybye
 		{"at 18:00 mon,wed,fri", "./gym.sh"},
 		{"at 07:30 weekends", "sleep 3600"},
 		{"at 12:00", "saybye"},
+		{"at 03:00", "mongodump --out /backup"},
+		{"at 18:00", "friday-backup"},
+		{"at 06:00", "LIST=a,b ./each.sh"},
 	}
 	for i, w := range want {
 		if got := tasks[i].Schedule.String(); got != w.sched {
@@ -315,6 +328,10 @@ func TestParseAtErrors(t *testing.T) {
 at 25:00 ./late.sh
 at 9 ./nine.sh
 at 09:00 weekdays
+at 09:00 weekday ./backup.sh
+at 18:00 mon,wed,fryday ./report.sh
+at 08:00 tues ./x.sh
+at 08:00 Mon-Thurs ./x.sh
 `
 	_, err := Parse(strings.NewReader(src))
 	var list ErrorList
@@ -326,6 +343,10 @@ at 09:00 weekdays
 		`at: invalid time "25:00"`,
 		`at: invalid time "9"`,
 		"missing command",
+		`at: invalid day "weekday" (use e.g. weekdays`,
+		`at: invalid day "fryday"`,
+		`at: invalid day "tues"`,
+		`at: invalid day "Thurs"`,
 	}
 	if len(list) != len(want) {
 		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)
@@ -333,6 +354,30 @@ at 09:00 weekdays
 	for i, w := range want {
 		if list[i].Line != i+1 || !strings.Contains(list[i].Msg, w) {
 			t.Errorf("error %d = line %d %q, want line %d containing %q", i, list[i].Line, list[i].Msg, i+1, w)
+		}
+	}
+}
+
+func TestParseSchedule(t *testing.T) {
+	for in, want := range map[string]string{
+		"every 90m":                 "every 1h30m",
+		"  at 9:00,13:30 mon-fri  ": "at 09:00,13:30 weekdays",
+		`cron "*/15 9-17 * * 1-5"`:  `cron "*/15 9-17 * * 1-5"`,
+		"cron 0 3 * * sun":          `cron "0 3 * * sun"`,
+		"cron @daily":               `cron "@daily"`,
+	} {
+		s, err := ParseSchedule(in)
+		if err != nil {
+			t.Errorf("ParseSchedule(%q): %v", in, err)
+			continue
+		}
+		if got := s.String(); got != want {
+			t.Errorf("ParseSchedule(%q) = %s, want %s", in, got, want)
+		}
+	}
+	for _, bad := range []string{"", "every", "at 09:00 ./cmd.sh", "hourly", "every 5m timeout=1s"} {
+		if _, err := ParseSchedule(bad); err == nil {
+			t.Errorf("ParseSchedule(%q) succeeded", bad)
 		}
 	}
 }

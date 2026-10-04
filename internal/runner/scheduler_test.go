@@ -299,6 +299,55 @@ func TestLoadKeepsScheduleOfUnchangedTasks(t *testing.T) {
 	close(f.release)
 }
 
+func TestLoadFollowsAnUnnamedTaskWhoseNameShifted(t *testing.T) {
+	unnamed := func(name, command string, every time.Duration) *taskfile.Task {
+		tk := task(name, command)
+		tk.Schedule = schedule.Every{Interval: every}
+		tk.AutoName = true
+		return tk
+	}
+	s, f, log := testScheduler(unnamed("job", "./job.sh main", time.Minute))
+	defer s.Kill()
+	s.tick(t0.Add(time.Minute)) // job runs and stays busy
+	expectRun(t, f, 1)
+
+	// A line added above it takes the name job; the unchanged task is now
+	// job-2.
+	reloadAt := t0.Add(90 * time.Second)
+	ch := s.Load([]*taskfile.Task{
+		unnamed("job", "./job.sh report", time.Hour),
+		unnamed("job-2", "./job.sh main", time.Minute),
+	}, reloadAt)
+	if want := (Changes{Added: 1}); ch != want {
+		t.Errorf("changes = %+v, want %+v", ch, want)
+	}
+	next := map[string]time.Time{}
+	for _, e := range s.entries {
+		next[e.task.Name] = e.next
+	}
+	if want := t0.Add(2 * time.Minute); !next["job-2"].Equal(want) {
+		t.Errorf("job-2: next = %v, want %v (kept)", next["job-2"], want)
+	}
+	if want := reloadAt.Add(time.Hour); !next["job"].Equal(want) {
+		t.Errorf("job: next = %v, want %v (new)", next["job"], want)
+	}
+	if st := s.state["job"]; st != nil {
+		t.Errorf("the new job took over the old one's state: %+v", *st)
+	}
+
+	// The run started as job is still going, so job-2 must not overlap it.
+	s.tick(t0.Add(2 * time.Minute))
+	expectNoRun(t, f)
+	if !strings.Contains(log.String(), "[job-2] -- skipped: still running") {
+		t.Errorf("log:\n%s", log)
+	}
+	close(f.release)
+	s.wg.Wait()
+	s.tick(t0.Add(3 * time.Minute))
+	expectRun(t, f, 2) // and its run count carries on
+	s.wg.Wait()
+}
+
 func TestChangesString(t *testing.T) {
 	if got := (Changes{}).String(); got != "no changes" {
 		t.Errorf("got %q", got)

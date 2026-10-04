@@ -139,21 +139,45 @@ func wait(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error {
 	case err := <-done:
 		return err
 	case <-expired:
-		signalGroup(cmd, syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(killDelay):
-			signalGroup(cmd, syscall.SIGKILL)
-			<-done
-		case <-ctx.Done():
-			signalGroup(cmd, syscall.SIGKILL)
-			<-done
-		}
+		stopGroup(ctx, cmd, done)
 		return &TimeoutError{After: timeout}
 	case <-ctx.Done():
 		signalGroup(cmd, syscall.SIGKILL)
 		<-done
 		return ErrKilled
+	}
+}
+
+// groupPoll is how often stopGroup checks whether a timed-out process
+// group is gone.
+const groupPoll = 50 * time.Millisecond
+
+// stopGroup sends SIGTERM to the command's process group, then SIGKILL
+// after killDelay (or as soon as ctx is cancelled) if anything in the group
+// is still there. The shell itself may die from SIGTERM while something it
+// started ignores it, so it is the group that counts, not the shell. done
+// delivers the shell's exit; stopGroup returns once it has.
+func stopGroup(ctx context.Context, cmd *exec.Cmd, done <-chan error) {
+	signalGroup(cmd, syscall.SIGTERM)
+	kill := time.NewTimer(killDelay)
+	defer kill.Stop()
+	poll := time.NewTicker(groupPoll)
+	defer poll.Stop()
+	for exited := false; !exited || groupAlive(cmd); {
+		select {
+		case <-done:
+			exited, done = true, nil
+			continue
+		case <-poll.C:
+			continue
+		case <-kill.C:
+		case <-ctx.Done():
+		}
+		signalGroup(cmd, syscall.SIGKILL)
+		if !exited {
+			<-done
+		}
+		return
 	}
 }
 

@@ -18,7 +18,7 @@ var version = "dev"
 
 const (
 	exitOK          = 0
-	exitFail        = 1 // a task failed, or the task file is invalid
+	exitFail        = 1 // a task failed, or the task file or a next EXPR is invalid
 	exitUsage       = 2
 	exitInterrupted = 130
 )
@@ -30,14 +30,14 @@ Usage:
   cronlite list  [-f FILE]
   cronlite check [-f FILE]
   cronlite once  [-f FILE]
-  cronlite next  EXPR [-n COUNT]
+  cronlite next  EXPR|SCHEDULE [-n COUNT] [--from TIME]
 
 Commands:
   run     run the scheduler in the foreground until Ctrl-C
   list    show each task with its schedule and next run time
   check   validate the task file, printing errors with line numbers
   once    run every task once, one after another; exit 1 if any failed
-  next    print the next fire times of a cron expression
+  next    print the next fire times of a cron expression or schedule
 
 Options:
   -f FILE        task file (default ./cronlite.txt, else ~/.config/cronlite/tasks)

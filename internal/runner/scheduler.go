@@ -36,14 +36,15 @@ type Scheduler struct {
 
 	rand func(time.Duration) time.Duration
 
-	mu      sync.Mutex
-	entries []*entry
-	state   map[string]*taskState // by task name
-	wg      sync.WaitGroup        // one per run in flight
-	stopCtx context.Context       // done once scheduling has stopped
-	stop    context.CancelFunc
-	killCtx context.Context // done when running tasks must die
-	kill    context.CancelFunc
+	mu       sync.Mutex
+	entries  []*entry
+	state    map[string]*taskState // by task name
+	inFlight int                   // runs started and not yet finished
+	wg       sync.WaitGroup        // one per run in flight
+	stopCtx  context.Context       // done once scheduling has stopped
+	stop     context.CancelFunc
+	killCtx  context.Context // done when running tasks must die
+	kill     context.CancelFunc
 }
 
 type entry struct {
@@ -94,40 +95,86 @@ func (c Changes) String() string {
 	return strings.Join(parts, ", ")
 }
 
-// Load replaces the scheduled tasks. Tasks are matched to the previous
-// ones by name: one whose schedule is unchanged keeps its next fire time,
-// so editing the file does not restart every interval, while new and
-// rescheduled tasks count from now. Runs in flight are left alone, and a
-// task that is still running keeps being skipped until it finishes.
+// Load replaces the scheduled tasks. Each task is matched to the previous
+// one it replaces (see match): one whose schedule is unchanged keeps its
+// next fire time, so editing the file does not restart every interval,
+// while new and rescheduled tasks count from now. Runs in flight are left
+// alone, and a task that is still running keeps being skipped until it
+// finishes, even if it now goes by another name.
 func (s *Scheduler) Load(tasks []*taskfile.Task, now time.Time) Changes {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old := make(map[string]*entry, len(s.entries))
-	for _, e := range s.entries {
-		old[e.task.Name] = e
-	}
-	var ch Changes
+	prevs := s.match(tasks)
+	ch := Changes{Removed: len(s.entries)}
 	entries := make([]*entry, 0, len(tasks))
-	for _, t := range tasks {
+	moved := make(map[string]*taskState) // new name -> state of a renamed task
+	for i, t := range tasks {
 		e := &entry{task: t}
-		prev, ok := old[t.Name]
-		delete(old, t.Name)
+		prev := prevs[i]
 		switch {
-		case !ok:
+		case prev == nil:
 			ch.Added++
 		case !sameTask(prev.task, t):
 			ch.Changed++
 		}
-		if ok && prev.task.Schedule.String() == t.Schedule.String() {
+		if prev != nil {
+			ch.Removed--
+			if prev.task.Name != t.Name {
+				moved[t.Name] = s.state[prev.task.Name]
+				delete(s.state, prev.task.Name)
+			}
+		}
+		if prev != nil && prev.task.Schedule.String() == t.Schedule.String() {
 			e.next = prev.next
 		} else if e.next = t.Schedule.Next(now); e.next.IsZero() {
 			s.Out.Eventf(t.Name, "never fires")
 		}
 		entries = append(entries, e)
 	}
-	ch.Removed = len(old)
+	// A renamed task takes its run count and any run in flight along.
+	for name, st := range moved {
+		if st != nil {
+			s.state[name] = st
+		} else {
+			delete(s.state, name)
+		}
+	}
 	s.entries = entries
 	return ch
+}
+
+// match returns, for each of tasks, the current entry it replaces, or nil
+// for a new task. That is the entry of the same name, except that an
+// unnamed task that did not change follows its line: unnamed tasks are
+// named after their program by position (job, job-2), so adding a line
+// above one can shift its name onto another task.
+func (s *Scheduler) match(tasks []*taskfile.Task) []*entry {
+	byName := make(map[string]*entry, len(s.entries))
+	for _, e := range s.entries {
+		byName[e.task.Name] = e
+	}
+	prevs := make([]*entry, len(tasks))
+	taken := make(map[*entry]bool)
+	// Unchanged tasks under the same name first, then unchanged unnamed
+	// tasks under another name, then the rest by name.
+	for i, t := range tasks {
+		if e := byName[t.Name]; e != nil && sameTask(e.task, t) {
+			prevs[i], taken[e] = e, true
+		}
+	}
+	for i, t := range tasks {
+		for _, e := range s.entries {
+			if prevs[i] == nil && !taken[e] && t.AutoName && e.task.AutoName && sameTask(e.task, t) {
+				prevs[i], taken[e] = e, true
+			}
+		}
+	}
+	for i, t := range tasks {
+		if e := byName[t.Name]; prevs[i] == nil && e != nil && !taken[e] {
+			prevs[i], taken[e] = e, true
+		}
+	}
+	return prevs
 }
 
 func sameTask(a, b *taskfile.Task) bool {
@@ -245,12 +292,14 @@ func (s *Scheduler) fire(t *taskfile.Task) {
 	st.runs++
 	run := st.runs
 	delay := s.jitter(t)
+	s.inFlight++
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() {
 			s.mu.Lock()
 			st.running = false
+			s.inFlight--
 			s.mu.Unlock()
 		}()
 		if delay > 0 {
@@ -281,13 +330,7 @@ func (s *Scheduler) jitter(t *taskfile.Task) time.Duration {
 func (s *Scheduler) running() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n := 0
-	for _, st := range s.state {
-		if st.running {
-			n++
-		}
-	}
-	return n
+	return s.inFlight
 }
 
 // Shutdown stops scheduling new runs, waits up to Grace for running tasks

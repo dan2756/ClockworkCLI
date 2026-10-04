@@ -43,7 +43,7 @@ cronlite run     # run the scheduler until Ctrl-C
 | `cronlite list [-f FILE]`   | show each task with its schedule and next run time              |
 | `cronlite check [-f FILE]`  | validate the task file; print every error with its line number  |
 | `cronlite once [-f FILE]`   | run every task once, one after another, right now               |
-| `cronlite next EXPR [-n N]` | print the next `N` (default 5) fire times of a cron expression  |
+| `cronlite next EXPR [-n N]` | print the next `N` (default 5) fire times of a schedule         |
 
 `cronlite -h` prints a summary and `cronlite --version` the version.
 
@@ -51,7 +51,7 @@ cronlite run     # run the scheduler until Ctrl-C
 
 ```
 $ cronlite run
-2026-02-01 22:45:44 [cronlite] -- loaded 6 tasks from cronlite.txt
+2026-02-01 22:45:44 [cronlite] -- loaded 6 tasks from cronlite.txt; watching it for changes
 2026-02-01 22:45:54 [ping] -- run 1 started
 2026-02-01 22:45:54 [ping] {"status":"ok"}
 2026-02-01 22:45:54 [ping] -- run 1 ok (112ms)
@@ -87,9 +87,12 @@ effect until the file is fixed:
 | `--jitter DUR` | delay every run by a random amount up to `DUR` (`jitter=` wins)  |
 | `--grace DUR`  | on shutdown, how long to wait for running tasks (default `10s`)  |
 
-On SIGINT or SIGTERM cronlite stops scheduling, waits up to `--grace` for
-running tasks to finish, then kills their process groups. A second Ctrl-C
-kills them right away.
+On SIGINT, SIGTERM or SIGHUP (the terminal closing; not under `nohup`)
+cronlite stops scheduling, waits up to `--grace` for running tasks to
+finish, then kills their process groups. A second Ctrl-C kills them right
+away. A closed output pipe does not stop cronlite, so Ctrl-C on
+`cronlite run | tee log`, which ends `tee` at once, still shuts the tasks
+down this way.
 
 ### list
 
@@ -122,11 +125,25 @@ them failed. Handy for trying out a new task file or for CI. Each run sees
 
 ### next
 
+Prints upcoming fire times, for checking an expression before it goes in
+the task file:
+
 ```
 $ cronlite next "*/15 9-17 * * 1-5" -n 3
 Mon 2026-02-02 09:00 EST  in 10h14m
 Mon 2026-02-02 09:15 EST  in 10h29m
 Mon 2026-02-02 09:30 EST  in 10h44m
+```
+
+`EXPR` is a bare cron expression or any schedule as written in a task file
+(`"at 09:00,13:30 weekdays"`, `"every 1h30m"`, `"cron @weekly"`). With
+`--from` it starts at another time instead of now, which is handy for seeing
+what happens around a daylight saving change:
+
+```
+$ TZ=America/New_York cronlite next "30 2 * * *" --from 2026-03-07 -n 2
+Sat 2026-03-07 02:30 EST  in 2h30m
+Sun 2026-03-08 03:00 EDT  in 1d2h
 ```
 
 ## Task file
@@ -191,7 +208,8 @@ two seconds later if anything is left.
 
 A run ends when its shell exits. If the command starts something in the
 background (`./server &`), cronlite does not wait for it, but keeps showing
-its output under the task's name.
+its output under the task's name. Once the shell has exited, such a process
+is on its own: neither `timeout=` nor stopping cronlite will stop it.
 
 ### Environment
 
@@ -204,19 +222,21 @@ Each run gets these on top of cronlite's own environment:
 
 ## Exit codes
 
-| Code | Meaning                                                         |
-|------|-----------------------------------------------------------------|
-| 0    | success; `run` exits 0 after a clean shutdown                   |
-| 1    | the task file is invalid or missing, or (`once`) a task failed  |
-| 2    | bad command line                                                |
-| 130  | `once` was interrupted                                          |
+| Code | Meaning                                                                                    |
+|------|--------------------------------------------------------------------------------------------|
+| 0    | success; `run` exits 0 after a clean shutdown                                              |
+| 1    | the task file is invalid or missing, (`once`) a task failed, or (`next`) `EXPR` is invalid |
+| 2    | bad command line                                                                           |
+| 130  | `once` was interrupted                                                                     |
 
 ## Platform notes
 
 cronlite runs on Linux and macOS. Commands run with `/bin/sh`, each in its
-own process group, so a timeout or shutdown also stops anything the command
-started in the background, and Ctrl-C in the terminal reaches cronlite
-rather than the tasks directly.
+own process group, so a timeout, or a shutdown while the command is still
+running, also stops anything it started in the background, and Ctrl-C in
+the terminal reaches cronlite rather than the tasks directly. Background
+processes that outlive their command's shell are left alone (see
+[Options](#options)).
 
 ## License
 
