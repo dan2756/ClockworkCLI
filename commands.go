@@ -107,7 +107,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 	for _, t := range tasks {
 		rel, abs := "never", ""
 		if next := t.Schedule.Next(t0); !next.IsZero() {
-			rel, abs = "in "+human(next.Sub(t0)), formatTime(next)
+			rel, abs = "in "+human(next.Sub(t0)), formatTime(next, false)
 		}
 		if _, ok := t.Schedule.(schedule.Every); ok {
 			rel += "*"
@@ -145,12 +145,24 @@ func survivePipeErrors() (undo func()) {
 	return func() { signal.Stop(c) }
 }
 
-// formatTime prints a fire time, with seconds only when they matter.
-func formatTime(t time.Time) string {
-	if t.Second() != 0 {
-		return t.Format("Mon 2006-01-02 15:04:05")
+// formatTime prints a fire time, with seconds and fractions only when they
+// are not zero. zone appends the time zone abbreviation.
+func formatTime(t time.Time, zone bool) string {
+	var layout string
+	switch {
+	case t.Nanosecond() == 0 && t.Second() == 0:
+		layout = "Mon 2006-01-02 15:04"
+	case t.Nanosecond() == 0:
+		layout = "Mon 2006-01-02 15:04:05"
+	case t.Nanosecond()%int(time.Millisecond) == 0:
+		layout = "Mon 2006-01-02 15:04:05.000"
+	default:
+		layout = "Mon 2006-01-02 15:04:05.000000000"
 	}
-	return t.Format("Mon 2006-01-02 15:04")
+	if zone {
+		layout += " MST"
+	}
+	return t.Format(layout)
 }
 
 func cmdOnce(args []string, stdout, stderr io.Writer) int {
@@ -233,7 +245,7 @@ Prints the next fire times of a cron expression or any task file schedule:
 		if t = sched.Next(t); t.IsZero() {
 			break
 		}
-		fmt.Fprintf(stdout, "%s  in %s\n", t.Format("Mon 2006-01-02 15:04 MST"), human(t.Sub(t0)))
+		fmt.Fprintf(stdout, "%s  in %s\n", formatTime(t, true), human(t.Sub(t0)))
 	}
 	return exitOK
 }
@@ -279,9 +291,15 @@ func (d *durationFlag) Set(s string) error {
 }
 
 // human formats a duration for people, with no more precision than is
-// useful: "45s", "3m20s", "13h8m", "2d3h".
+// useful: "250ms", "45s", "3m20s", "13h8m", "2d3h".
 func human(d time.Duration) string {
 	switch {
+	case d < time.Second:
+		// Rounding to the second turns every 250ms into "in 0s".
+		if d < time.Millisecond {
+			return schedule.FormatDuration(d)
+		}
+		return schedule.FormatDuration(d.Round(time.Millisecond))
 	case d < time.Hour:
 		d = d.Round(time.Second)
 	case d < 24*time.Hour:
