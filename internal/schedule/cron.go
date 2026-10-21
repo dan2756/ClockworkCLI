@@ -142,8 +142,15 @@ func (f cronField) parse(s string) (uint64, error) {
 			}
 			step = n
 		}
-		for v := lo; v <= hi; v += step {
+		// Don't write `v += step` in the for clause: a step near the top of
+		// int wraps v back into range, which both sets the wrong bits and,
+		// for some steps, never finishes.
+		for v := lo; ; {
 			bits |= 1 << uint(v)
+			if step > hi-v {
+				break
+			}
+			v += step
 		}
 	}
 	return bits, nil

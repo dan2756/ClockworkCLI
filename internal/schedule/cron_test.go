@@ -171,6 +171,42 @@ func TestCronString(t *testing.T) {
 	}
 }
 
+func TestParseCronHugeStep(t *testing.T) {
+	// A step near the top of int used to wrap the field cursor. Some of
+	// those expressions never returned; others came back matching minutes
+	// the step does not land on.
+	tests := []struct {
+		expr string
+		got  func(*Cron) uint64
+		want uint64
+	}{
+		{"19/9223372036854775807 * * * *", func(c *Cron) uint64 { return c.minute }, bitsOf(19)},
+		{"59/9223372036854775807 * * * *", func(c *Cron) uint64 { return c.minute }, bitsOf(59)},
+		{"0 2/9223372036854775807 * * *", func(c *Cron) uint64 { return c.hour }, bitsOf(2)},
+		{"* * 3/9223372036854775807 * *", func(c *Cron) uint64 { return c.dom }, bitsOf(3)},
+	}
+	for _, tt := range tests {
+		done := make(chan struct{})
+		var c *Cron
+		var err error
+		go func() {
+			c, err = ParseCron(tt.expr)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("ParseCron(%q) hung", tt.expr)
+		}
+		if err != nil {
+			t.Fatalf("ParseCron(%q): %v", tt.expr, err)
+		}
+		if got := tt.got(c); got != tt.want {
+			t.Errorf("%q: got %b, want %b", tt.expr, got, tt.want)
+		}
+	}
+}
+
 func TestParseCronNicknames(t *testing.T) {
 	tests := []struct{ nick, same string }{
 		{"@yearly", "0 0 1 1 *"},
