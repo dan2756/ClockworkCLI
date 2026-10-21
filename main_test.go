@@ -115,6 +115,45 @@ check-queue  cron "*/15 9-17 * * 1-5"  in 10h14m  Mon 2026-02-02 09:00     ./che
 	}
 }
 
+func TestListAndNextShowShortEvery(t *testing.T) {
+	fixClock(t, time.Date(2026, 1, 23, 16, 0, 10, 0, time.UTC)) // a Friday
+	path := writeTasks(t, "every 250ms name=tick true\n")
+	code, stdout, stderr := runCLI("list", "-f", path)
+	if code != exitOK {
+		t.Fatalf("list: code %d, stderr %q", code, stderr)
+	}
+	want := `NAME  SCHEDULE     NEXT RUN                                COMMAND
+tick  every 250ms  in 250ms*  Fri 2026-01-23 16:00:10.250  true
+
+* every schedules count from when cronlite run starts
+`
+	if stdout != want {
+		t.Errorf("list got:\n%s\nwant:\n%s", stdout, want)
+	}
+
+	code, stdout, stderr = runCLI("next", "every 45s", "-n", "2")
+	if code != exitOK {
+		t.Fatalf("next 45s: code %d, stderr %q", code, stderr)
+	}
+	want = `Fri 2026-01-23 16:00:55 UTC  in 45s
+Fri 2026-01-23 16:01:40 UTC  in 1m30s
+`
+	if stdout != want {
+		t.Errorf("next 45s got:\n%s\nwant:\n%s", stdout, want)
+	}
+
+	code, stdout, stderr = runCLI("next", "every 250ms", "-n", "2")
+	if code != exitOK {
+		t.Fatalf("next 250ms: code %d, stderr %q", code, stderr)
+	}
+	want = `Fri 2026-01-23 16:00:10.250 UTC  in 250ms
+Fri 2026-01-23 16:00:10.500 UTC  in 500ms
+`
+	if stdout != want {
+		t.Errorf("next 250ms got:\n%s\nwant:\n%s", stdout, want)
+	}
+}
+
 func TestOnce(t *testing.T) {
 	path := writeTasks(t, `every 1h echo "first $CRONLITE_RUN"
 every 1h name=broken exit 3
