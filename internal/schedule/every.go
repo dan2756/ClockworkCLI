@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -27,10 +28,19 @@ func ParseDuration(s string) (time.Duration, error) {
 	var days time.Duration
 	if i := strings.IndexByte(rest, 'd'); i >= 0 {
 		n, err := strconv.ParseFloat(rest[:i], 64)
-		if err != nil || n < 0 {
+		if err != nil || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
 			return 0, bad
 		}
-		days = time.Duration(n * float64(day))
+		// float64(MaxInt64) is 2^63. Anything that large does not fit in a
+		// Duration, and the conversion would come back negative.
+		scaled := n * float64(day)
+		if scaled >= float64(math.MaxInt64) {
+			return 0, bad
+		}
+		days = time.Duration(scaled)
+		if days < 0 {
+			return 0, bad
+		}
 		rest = rest[i+1:]
 		if rest == "" {
 			return days, nil
@@ -41,6 +51,15 @@ func ParseDuration(s string) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(rest)
 	if err != nil {
+		return 0, bad
+	}
+	if d < 0 {
+		if days != 0 {
+			return 0, bad
+		}
+		return d, nil
+	}
+	if days > math.MaxInt64-d {
 		return 0, bad
 	}
 	return days + d, nil

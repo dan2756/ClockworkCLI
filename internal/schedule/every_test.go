@@ -19,6 +19,9 @@ func TestParseDuration(t *testing.T) {
 		{"1d12h", 36 * time.Hour},
 		{"1.5d", 36 * time.Hour},
 		{"0s", 0},
+		{"100000d", 100000 * 24 * time.Hour},
+		// Largest whole number of days that fits in a Duration.
+		{"106751d", 106751 * 24 * time.Hour},
 	}
 	for _, tt := range tests {
 		got, err := ParseDuration(tt.in)
@@ -33,7 +36,11 @@ func TestParseDuration(t *testing.T) {
 }
 
 func TestParseDurationErrors(t *testing.T) {
-	for _, in := range []string{"", "5", "5x", "d", "-1d", "1d-5h", "1h1d", "five minutes"} {
+	for _, in := range []string{
+		"", "5", "5x", "d", "-1d", "1d-5h", "1h1d", "five minutes",
+		// These used to come back negative instead of failing.
+		"106752d", "1e6d", "NaNd", "Infd", "+Infd", "106751d24h", "106751d23h48m",
+	} {
 		if d, err := ParseDuration(in); err == nil {
 			t.Errorf("ParseDuration(%q) = %v, want error", in, d)
 		}
