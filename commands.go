@@ -263,9 +263,18 @@ func parseNextArg(s string) (schedule.Schedule, error) {
 // parseTime parses a date with an optional time of day in loc.
 func parseTime(s string, loc *time.Location) (time.Time, error) {
 	for _, layout := range []string{"2006-01-02 15:04", "2006-01-02T15:04", "2006-01-02 15:04:05", "2006-01-02"} {
-		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
-			return t, nil
+		t, err := time.ParseInLocation(layout, s, loc)
+		if err != nil {
+			continue
 		}
+		// Spring-forward gaps have no such clock reading. ParseInLocation
+		// still returns a time, but it is a different reading (an hour
+		// earlier in America/New_York), so next would start from the wrong
+		// instant. A repeated hour formats back to the same reading.
+		if t.Format(layout) != s {
+			return time.Time{}, fmt.Errorf("%s does not exist in %s (daylight saving time gap)", s, loc)
+		}
+		return t, nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.In(loc), nil
