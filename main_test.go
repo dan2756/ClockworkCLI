@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	_ "time/tzdata" // so DST tests run where the system zoneinfo is missing
 )
 
 // TestMain lets a test run cronlite as a child process: with
@@ -221,6 +222,37 @@ Sun 2026-01-04 00:00 UTC  in 3d
 	}
 	if code, _, _ := runCLI("next", "* * * * *", "-n", "0"); code != exitUsage {
 		t.Errorf("-n 0: code %d", code)
+	}
+}
+
+func TestNextFromDSTGap(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 02:30 does not exist on the spring-forward day. Parsing it used to
+	// succeed as 01:30, so next started an hour early.
+	fixClock(t, time.Date(2026, 3, 8, 12, 0, 0, 0, ny))
+	code, stdout, stderr := runCLI("next", "30 2 * * *", "--from", "2026-03-08 02:30", "-n", "1")
+	if code != exitUsage || !strings.Contains(stderr, "2026-03-08 02:30 does not exist in America/New_York") {
+		t.Errorf("gap: code %d, stderr %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("gap wrote %q", stdout)
+	}
+
+	// The repeated hour does exist; use the first occurrence. A time after
+	// the jump is a real time too.
+	got, err := parseTime("2026-11-01 01:30", ny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "EDT" || off != -4*3600 || got.Hour() != 1 || got.Minute() != 30 {
+		t.Errorf("repeated hour = %s, want the first 01:30 EDT", got.Format(time.RFC3339))
+	}
+	code, stdout, stderr = runCLI("next", "0 3 * * *", "--from", "2026-03-08 03:00", "-n", "1")
+	if code != exitOK || !strings.Contains(stdout, "Mon 2026-03-09 03:00 EDT") {
+		t.Errorf("after jump: code %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 
