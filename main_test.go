@@ -94,6 +94,21 @@ func TestFindTaskFile(t *testing.T) {
 	}
 }
 
+func TestFindTaskFileStatError(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "unused"))
+	// A symlink to itself cannot be stat-ed. That is not "no such file",
+	// and the config-directory file must not be used instead.
+	if err := os.Symlink("cronlite.txt", "cronlite.txt"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := findTaskFile("")
+	if err == nil || os.IsNotExist(err) || strings.Contains(err.Error(), "no task file") {
+		t.Fatalf("cyclic cronlite.txt: err = %v", err)
+	}
+}
+
 func TestList(t *testing.T) {
 	fixClock(t, time.Date(2026, 2, 1, 22, 45, 44, 0, time.UTC))
 	path := writeTasks(t, `every 5m ./scripts/sync.sh

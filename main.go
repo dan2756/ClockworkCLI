@@ -153,8 +153,12 @@ func findTaskFile(flagValue string) (string, error) {
 	if flagValue != "" {
 		return flagValue, nil
 	}
-	if _, err := os.Stat("cronlite.txt"); err == nil {
+	switch _, err := os.Stat("cronlite.txt"); {
+	case err == nil:
 		return "cronlite.txt", nil
+	case !os.IsNotExist(err):
+		// Not a missing file: don't fall through to the config path.
+		return "", err
 	}
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
@@ -165,8 +169,11 @@ func findTaskFile(flagValue string) (string, error) {
 		cfg = filepath.Join(home, ".config")
 	}
 	p := filepath.Join(cfg, "cronlite", "tasks")
-	if _, err := os.Stat(p); err == nil {
+	switch _, err := os.Stat(p); {
+	case err == nil:
 		return p, nil
+	case !os.IsNotExist(err):
+		return "", err
 	}
 	return "", fmt.Errorf("no task file: create ./cronlite.txt or %s, or pass -f FILE", p)
 }
