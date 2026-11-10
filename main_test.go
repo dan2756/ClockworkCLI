@@ -254,6 +254,17 @@ func TestNextFromDSTGap(t *testing.T) {
 	if code != exitOK || !strings.Contains(stdout, "Mon 2026-03-09 03:00 EDT") {
 		t.Errorf("after jump: code %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
+
+	// "9:00" is 09:00. It used to be rejected as a gap because formatting
+	// it back adds the leading zero.
+	code, stdout, stderr = runCLI("next", "0 9 * * *", "--from", "2026-03-08 9:00", "-n", "1")
+	if code != exitOK || !strings.Contains(stdout, "Mon 2026-03-09 09:00 EDT") {
+		t.Errorf("unpadded hour: code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	code, _, stderr = runCLI("next", "30 2 * * *", "--from", "2026-03-08 2:30", "-n", "1")
+	if code != exitUsage || !strings.Contains(stderr, "2026-03-08 2:30 does not exist in America/New_York") {
+		t.Errorf("unpadded gap: code %d, stderr %q", code, stderr)
+	}
 }
 
 func TestRunSurvivesClosedOutputAndStopsOnHangup(t *testing.T) {
