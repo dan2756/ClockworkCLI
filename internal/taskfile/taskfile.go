@@ -107,7 +107,7 @@ func Parse(r io.Reader) ([]*Task, error) {
 
 // ParseFile reads the task file at path. Tasks run in the directory that
 // contains the file unless they set dir=, which is itself relative to that
-// directory and may start with ~.
+// directory and may start with ~. A ~ that cannot be resolved is an error.
 func ParseFile(name string) ([]*Task, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -119,25 +119,44 @@ func ParseFile(name string) ([]*Task, error) {
 	if absErr != nil {
 		return nil, absErr
 	}
+	var dirErrs ErrorList
 	for _, t := range tasks {
-		t.Dir = resolveDir(base, t.Dir)
+		resolved, rerr := resolveDir(base, t.Dir)
+		if rerr != nil {
+			dirErrs = append(dirErrs, &Error{Line: t.Line, Msg: rerr.Error()})
+			continue
+		}
+		t.Dir = resolved
 	}
-	return tasks, err
+	if len(dirErrs) == 0 {
+		return tasks, err
+	}
+	if list, ok := err.(ErrorList); ok {
+		dirErrs = append(list, dirErrs...)
+		slices.SortStableFunc(dirErrs, func(a, b *Error) int { return a.Line - b.Line })
+		return tasks, dirErrs
+	}
+	if err != nil {
+		return tasks, err
+	}
+	return tasks, dirErrs
 }
 
-func resolveDir(base, dir string) string {
+func resolveDir(base, dir string) (string, error) {
 	if dir == "~" || strings.HasPrefix(dir, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, dir[1:])
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("dir: cannot expand %q: %v", dir, err)
 		}
+		dir = filepath.Join(home, dir[1:])
 	}
 	if dir == "" {
-		return base
+		return base, nil
 	}
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(base, dir)
 	}
-	return filepath.Clean(dir)
+	return filepath.Clean(dir), nil
 }
 
 func parseLine(line string) (*Task, error) {

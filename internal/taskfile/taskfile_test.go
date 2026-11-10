@@ -144,6 +144,29 @@ every 1m dir="../with space" true
 	}
 }
 
+func TestParseFileTildeWithoutHome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tasks")
+	src := "every 1m dir=~ true\nevery 1m dir=~/notes true\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", "")
+	_, err := ParseFile(path)
+	var list ErrorList
+	if !errors.As(err, &list) {
+		t.Fatalf("err = %v, want ErrorList", err)
+	}
+	if len(list) != 2 || list[0].Line != 1 || list[1].Line != 2 {
+		t.Fatalf("errors = %v", list)
+	}
+	for _, e := range list {
+		if !strings.Contains(e.Msg, "cannot expand") {
+			t.Errorf("error = %v", e)
+		}
+	}
+}
+
 func TestParseOptions(t *testing.T) {
 	src := `every 10s  timeout=5s  name=ping   curl -fsS https://example.com/health
 at 03:00 weekdays jitter=10m onfail=continue ./backup.sh
