@@ -298,6 +298,7 @@ at 12:00 saybye
 at 03:00 mongodump --out /backup
 at 18:00 friday-backup
 at 06:00 LIST=a,b ./each.sh
+at 09:00 logs ./rotate.sh
 `
 	tasks, err := Parse(strings.NewReader(src))
 	if err != nil {
@@ -312,6 +313,7 @@ at 06:00 LIST=a,b ./each.sh
 		{"at 03:00", "mongodump --out /backup"},
 		{"at 18:00", "friday-backup"},
 		{"at 06:00", "LIST=a,b ./each.sh"},
+		{"at 09:00", "logs ./rotate.sh"},
 	}
 	for i, w := range want {
 		if got := tasks[i].Schedule.String(); got != w.sched {
@@ -332,6 +334,8 @@ at 09:00 weekday ./backup.sh
 at 18:00 mon,wed,fryday ./report.sh
 at 08:00 tues ./x.sh
 at 08:00 Mon-Thurs ./x.sh
+at 09:00 fridays ./backup.sh
+at 09:00 Sundays ./x.sh
 `
 	_, err := Parse(strings.NewReader(src))
 	var list ErrorList
@@ -347,6 +351,8 @@ at 08:00 Mon-Thurs ./x.sh
 		`at: invalid day "fryday"`,
 		`at: invalid day "tues"`,
 		`at: invalid day "Thurs"`,
+		`at: invalid day "fridays"`,
+		`at: invalid day "Sundays"`,
 	}
 	if len(list) != len(want) {
 		t.Fatalf("got %d errors, want %d: %v", len(list), len(want), list)
