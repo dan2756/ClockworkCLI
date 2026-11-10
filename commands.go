@@ -270,8 +270,10 @@ func parseTime(s string, loc *time.Location) (time.Time, error) {
 		// Spring-forward gaps have no such clock reading. ParseInLocation
 		// still returns a time, but it is a different reading (an hour
 		// earlier in America/New_York), so next would start from the wrong
-		// instant. A repeated hour formats back to the same reading.
-		if t.Format(layout) != s {
+		// instant. A repeated hour keeps the reading it was given. So does
+		// a looser spelling of a real time, such as "9:00", which formats
+		// back as "09:00".
+		if t.Format(layout) != s && !sameClockReading(t, layout, s) {
 			return time.Time{}, fmt.Errorf("%s does not exist in %s (daylight saving time gap)", s, loc)
 		}
 		return t, nil
@@ -280,6 +282,21 @@ func parseTime(s string, loc *time.Location) (time.Time, error) {
 		return t.In(loc), nil
 	}
 	return time.Time{}, fmt.Errorf("invalid time %q (want YYYY-MM-DD or YYYY-MM-DD HH:MM)", s)
+}
+
+// sameClockReading reports whether t's wall clock is the reading s names.
+// ParseInLocation accepts a gap and returns some other reading, and it also
+// accepts an unpadded field such as "9:00" and returns that same reading.
+func sameClockReading(t time.Time, layout, s string) bool {
+	asked, err := time.Parse(layout, s)
+	if err != nil {
+		return false
+	}
+	ay, am, ad := asked.Date()
+	ty, tm, td := t.Date()
+	return ay == ty && am == tm && ad == td &&
+		asked.Hour() == t.Hour() && asked.Minute() == t.Minute() &&
+		asked.Second() == t.Second() && asked.Nanosecond() == t.Nanosecond()
 }
 
 // durationFlag is a flag.Value accepting ParseDuration syntax.
