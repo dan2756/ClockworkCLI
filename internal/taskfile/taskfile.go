@@ -237,8 +237,8 @@ func parseSchedule(lx *lexer, t *Task) error {
 
 // meantAsDays reports whether a word after an at time that is not a valid
 // day filter was still meant as one, rather than as the start of the
-// command: a list ("mon,wed,fryday"), "weekday" or "weekend", or day names
-// cut short ("tues", "mon-thurs").
+// command: a list ("mon,wed,fryday"), "weekday" or "weekend", day names
+// cut short ("tues", "mon-thurs"), or a plural ("fridays").
 func meantAsDays(w string) bool {
 	w = strings.ToLower(w)
 	if strings.ContainsFunc(w, func(r rune) bool { return (r < 'a' || r > 'z') && r != ',' && r != '-' }) {
@@ -256,8 +256,16 @@ func meantAsDays(w string) bool {
 }
 
 // isDayPrefix reports whether s is the start of a day name, at least three
-// letters long, such as "wed", "thurs" or "saturday".
+// letters long, such as "wed", "thurs" or "saturday", or a plural of one
+// ("fridays"). s is lowercase.
 func isDayPrefix(s string) bool {
+	if dayStem(s) {
+		return true
+	}
+	return len(s) > 3 && strings.HasSuffix(s, "s") && dayStem(s[:len(s)-1])
+}
+
+func dayStem(s string) bool {
 	if len(s) < 3 {
 		return false
 	}
