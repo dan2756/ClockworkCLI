@@ -80,7 +80,13 @@ func Parse(r io.Reader) ([]*Task, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
+		text := sc.Text()
+		if n == 1 {
+			// A UTF-8 BOM is not a schedule. Editors that save one used
+			// to fail the first line as an unknown schedule.
+			text = strings.TrimPrefix(text, "\uFEFF")
+		}
+		line := strings.TrimSpace(text)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
