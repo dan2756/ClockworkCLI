@@ -11,6 +11,22 @@ import (
 	"github.com/dan2756/cronlite/internal/schedule"
 )
 
+func TestParseLeadingBOM(t *testing.T) {
+	tasks, err := Parse(strings.NewReader("\ufeff# header\n\nevery 1m ./sync.sh\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Name != "sync" || tasks[0].Line != 3 {
+		t.Fatalf("got %+v", tasks)
+	}
+	// A mark later in the file is not a BOM and still fails that line.
+	_, err = Parse(strings.NewReader("every 1m true\n\ufeffevery 1m true\n"))
+	var list ErrorList
+	if !errors.As(err, &list) || len(list) != 1 || list[0].Line != 2 {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestParseEvery(t *testing.T) {
 	src := `# comments and blank lines are fine
 
