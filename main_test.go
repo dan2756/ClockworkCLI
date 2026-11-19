@@ -282,6 +282,76 @@ func TestNextFromDSTGap(t *testing.T) {
 	}
 }
 
+func TestNextFromRepeatedHour(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2026-10-25 02:30 happens twice. ParseInLocation returns the later
+	// CET reading east of UTC; the first (CEST) is the one schedules use.
+	// Starting from CET skips 02:45 that same morning.
+	fixClock(t, time.Date(2026, 10, 25, 12, 0, 0, 0, berlin))
+	got, err := parseTime("2026-10-25 02:30", berlin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "CEST" || off != 2*3600 || got.Hour() != 2 || got.Minute() != 30 {
+		t.Fatalf("berlin = %s, want the first 02:30 CEST", got.Format(time.RFC3339))
+	}
+	got, err = parseTime("2026-10-25 2:30", berlin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "CEST" || off != 2*3600 {
+		t.Fatalf("unpadded berlin = %s, want the first 02:30 CEST", got.Format(time.RFC3339))
+	}
+	code, stdout, stderr := runCLI("next", "45 2 * * *", "--from", "2026-10-25 02:30", "-n", "1")
+	if code != exitOK || !strings.Contains(stdout, "2026-10-25 02:45 CEST") {
+		t.Errorf("from first 02:30: code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+
+	// A reading that happens only once, including later that day, stays put.
+	got, err = parseTime("2026-10-25 01:30", berlin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "CEST" || off != 2*3600 || got.Hour() != 1 {
+		t.Fatalf("before the fold = %s", got.Format(time.RFC3339))
+	}
+	got, err = parseTime("2026-10-25 04:00", berlin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "CET" || off != 3600 || got.Hour() != 4 {
+		t.Fatalf("after the fold = %s", got.Format(time.RFC3339))
+	}
+	got, err = parseTime("2026-12-01 12:00", berlin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, off := got.Zone(); name != "CET" || off != 3600 || got.Hour() != 12 {
+		t.Fatalf("winter = %s", got.Format(time.RFC3339))
+	}
+
+	// Lord Howe folds by 30 minutes, and ParseInLocation returns the later one.
+	lh, err := time.LoadLocation("Australia/Lord_Howe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixClock(t, time.Date(2026, 4, 5, 12, 0, 0, 0, lh))
+	got, err = parseTime("2026-04-05 01:45", lh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, off := got.Zone(); off != 11*3600 || got.Hour() != 1 || got.Minute() != 45 {
+		t.Fatalf("lord howe = %s, want the first 01:45 +11", got.Format(time.RFC3339))
+	}
+	code, stdout, stderr = runCLI("next", "50 1 * * *", "--from", "2026-04-05 01:45", "-n", "1")
+	if code != exitOK || !strings.Contains(stdout, "2026-04-05 01:50") {
+		t.Errorf("lord howe next: code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
 func TestRunSurvivesClosedOutputAndStopsOnHangup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs cronlite and real tasks")

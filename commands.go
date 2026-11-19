@@ -276,12 +276,48 @@ func parseTime(s string, loc *time.Location) (time.Time, error) {
 		if t.Format(layout) != s && !sameClockReading(t, layout, s) {
 			return time.Time{}, fmt.Errorf("%s does not exist in %s (daylight saving time gap)", s, loc)
 		}
-		return t, nil
+		// A repeated hour happens twice. ParseInLocation returns one of
+		// them, and which one depends on the zone: the first in
+		// America/New_York, the second in Europe/Berlin. Schedules use
+		// the first, so --from does too. Otherwise a start of 02:30 on a
+		// fall-back morning is an hour late and skips fires still ahead
+		// in the first pass.
+		return firstOccurrence(t), nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.In(loc), nil
 	}
 	return time.Time{}, fmt.Errorf("invalid time %q (want YYYY-MM-DD or YYYY-MM-DD HH:MM)", s)
+}
+
+// firstOccurrence returns the earlier instant at which the wall clock
+// reads the same as t. t is returned unchanged when the reading happens
+// only once.
+func firstOccurrence(t time.Time) time.Time {
+	start, _ := t.ZoneBounds()
+	if start.IsZero() {
+		return t
+	}
+	_, off := t.Zone()
+	_, prevOff := start.Add(-time.Second).Zone()
+	if prevOff <= off {
+		return t
+	}
+	earlier := t.Add(-time.Duration(prevOff-off) * time.Second)
+	if !earlier.Before(start) || !sameWall(earlier, t) {
+		return t
+	}
+	return earlier
+}
+
+// sameWall reports whether a and b are the same clock reading.
+func sameWall(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	ah, amin, as := a.Clock()
+	bh, bmin, bs := b.Clock()
+	return ay == by && am == bm && ad == bd &&
+		ah == bh && amin == bmin && as == bs && a.Nanosecond() == b.Nanosecond()
 }
 
 // sameClockReading reports whether t's wall clock is the reading s names.
